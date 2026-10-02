@@ -23,7 +23,7 @@
         "@laravel/multiplex": "^0.4.1"
     },
     "dependencies": {
-        "maplibre-gl": "^6.11.2",
-        "maplibre-gl-draw": "^1.6.9"
+        "@geoman-io/leaflet-geoman-free": "^2.20.2",
+        "leaflet": "^1.9.4"
     }
 }
