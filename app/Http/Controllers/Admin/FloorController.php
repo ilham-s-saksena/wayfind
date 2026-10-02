@@ -37,6 +37,13 @@ class FloorController extends Controller
         $building->floors()->create([
             'name' => $validated['name'],
             'level' => $validated['level'],
+            'map_data' => [
+                'type' => 'FeatureCollection',
+                'features' => [],
+            ],
+            'background_image' => null,
+            'background_visible' => true,
+            'background_opacity' => 0.5,
         ]);
 
         return redirect()->route('admin.buildings.show', $building)->with('success', 'Floor created successfully.');
@@ -91,9 +98,11 @@ class FloorController extends Controller
             'features' => [],
         ];
 
+        $backgroundImage = $validated['background_image'] ?? $floor->background_image;
+
         $floor->update([
             'map_data' => $mapData,
-            'background_image' => $validated['background_image'] ?? $floor->background_image,
+            'background_image' => $backgroundImage === '' ? null : $backgroundImage,
             'background_visible' => $request->boolean('background_visible', $floor->background_visible ?? true),
             'background_opacity' => $validated['background_opacity'] ?? $floor->background_opacity ?? 0.5,
         ]);

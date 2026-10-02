@@ -68,8 +68,12 @@ class MapController extends Controller
             'places' => $places,
             'selectedBuildingId' => $building->id,
             'selectedFloorId' => $floor?->id,
+            'selectedBuilding' => $building,
+            'selectedFloor' => $floor,
             'selectedPlace' => $selectedPlace,
             'search' => $search,
+            'buildingGeojson' => $this->buildBuildingsGeoJson($buildings),
+            'floorGeojson' => $this->buildFloorGeoJson($floor, $places, $building),
             'mapGeojson' => $this->buildFloorGeoJson($floor, $places, $building),
         ]);
     }
@@ -82,58 +86,60 @@ class MapController extends Controller
         ];
     }
 
+    protected function buildBuildingsGeoJson($buildings): array
+    {
+        $features = [];
+
+        foreach ($buildings as $building) {
+            if (! is_array($building->geojson) || empty($building->geojson['features'] ?? null)) {
+                continue;
+            }
+
+            foreach ($building->geojson['features'] as $feature) {
+                $features[] = [
+                    ...$feature,
+                    'properties' => [
+                        ...(isset($feature['properties']) && is_array($feature['properties']) ? $feature['properties'] : []),
+                        'kind' => 'building',
+                        'buildingId' => $building->id,
+                        'buildingName' => $building->name,
+                    ],
+                ];
+            }
+        }
+
+        return [
+            'type' => 'FeatureCollection',
+            'features' => $features,
+        ];
+    }
+
     protected function buildFloorGeoJson(?Floor $floor, $places, ?Building $building = null): array
     {
         $features = [];
 
         if ($building && is_array($building->geojson) && ($building->geojson['features'] ?? false)) {
             foreach ($building->geojson['features'] as $feature) {
+                $features[] = [
+                    ...$feature,
+                    'properties' => [
+                        ...(isset($feature['properties']) && is_array($feature['properties']) ? $feature['properties'] : []),
+                        'kind' => 'building',
+                        'buildingId' => $building->id,
+                        'buildingName' => $building->name,
+                    ],
+                ];
+            }
+        }
+
+        foreach ($places as $index => $place) {
+            $placeFeatures = $this->buildPlaceGeoJson($place, $index);
+            foreach ($placeFeatures as $feature) {
                 $features[] = $feature;
             }
         }
 
-        if ($floor) {
-            $features[] = [
-                'type' => 'Feature',
-                'properties' => [
-                    'kind' => 'floor',
-                    'name' => $floor->name,
-                ],
-                'geometry' => [
-                    'type' => 'Polygon',
-                    'coordinates' => [[
-                        [0, 0],
-                        [1200, 0],
-                        [1200, 800],
-                        [0, 800],
-                        [0, 0],
-                    ]],
-                ],
-            ];
-        }
-
-        foreach ($places as $index => $place) {
-            $x = 140 + ($index % 4) * 230;
-            $y = 150 + intdiv($index, 4) * 170;
-
-            $features[] = [
-                'type' => 'Feature',
-                'properties' => [
-                    'id' => $place->id,
-                    'name' => $place->name,
-                    'type' => $place->type,
-                    'slug' => $place->slug,
-                    'description' => $place->description,
-                    'isSelected' => false,
-                ],
-                'geometry' => [
-                    'type' => 'Point',
-                    'coordinates' => [$x, $y],
-                ],
-            ];
-        }
-
-        if ($floor && is_array($floor->map_data) && ($floor->map_data['features'] ?? false)) {
+        if ($floor && is_array($floor->map_data) && is_array($floor->map_data['features'] ?? null)) {
             foreach ($floor->map_data['features'] as $feature) {
                 $features[] = $feature;
             }
@@ -143,5 +149,51 @@ class MapController extends Controller
             'type' => 'FeatureCollection',
             'features' => $features,
         ];
+    }
+
+    protected function buildPlaceGeoJson($place, int $index): array
+    {
+        $mappedGeojson = is_array($place->geojson) ? $place->geojson : [];
+        $features = $mappedGeojson['features'] ?? [];
+
+        if ($features !== []) {
+            foreach ($features as &$feature) {
+                $feature = [
+                    ...$feature,
+                    'properties' => [
+                        ...(isset($feature['properties']) && is_array($feature['properties']) ? $feature['properties'] : []),
+                        'id' => $place->id,
+                        'name' => $place->name,
+                        'type' => $place->type,
+                        'slug' => $place->slug,
+                        'description' => $place->description,
+                        'kind' => 'place',
+                        'isSelected' => false,
+                    ],
+                ];
+            }
+
+            return $features;
+        }
+
+        $x = 140 + ($index % 4) * 230;
+        $y = 150 + intdiv($index, 4) * 170;
+
+        return [[
+            'type' => 'Feature',
+            'properties' => [
+                'id' => $place->id,
+                'name' => $place->name,
+                'type' => $place->type,
+                'slug' => $place->slug,
+                'description' => $place->description,
+                'kind' => 'place',
+                'isSelected' => false,
+            ],
+            'geometry' => [
+                'type' => 'Point',
+                'coordinates' => [$x, $y],
+            ],
+        ]];
     }
 }
