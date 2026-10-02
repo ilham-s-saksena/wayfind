@@ -52,6 +52,14 @@ const selectedFloor = computed(() =>
     props.floors.find((floor) => floor.id === props.selectedFloorId) || props.floors[0] || null,
 );
 
+const resultSummary = computed(() => {
+    if (props.places.length === 0) {
+        return 'No results';
+    }
+
+    return `${props.places.length} ${props.places.length === 1 ? 'destination' : 'destinations'}`;
+});
+
 watch(
     () => props.selectedPlace,
     (value) => {
@@ -165,11 +173,11 @@ const selectPlace = (place) => {
         </header>
 
         <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-            <div class="grid gap-6 xl:grid-cols-[1.5fr_0.75fr]">
+            <div class="grid gap-6 xl:grid-cols-[1.6fr_0.8fr]">
                 <section class="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
                     <div class="mb-3 flex items-center justify-between px-2">
                         <div>
-                            <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Map</p>
+                            <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Current location</p>
                             <h2 class="text-lg font-semibold text-slate-900">{{ selectedBuilding?.name || 'Building' }}</h2>
                         </div>
                         <div class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
@@ -184,9 +192,9 @@ const selectPlace = (place) => {
                         <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Selected destination</p>
                         <div v-if="activePlace" class="mt-3">
                             <h3 class="text-xl font-semibold text-slate-900">{{ activePlace.name }}</h3>
-                            <p class="mt-1 text-sm text-slate-500">{{ activePlace.type || 'facility' }}</p>
+                            <p class="mt-1 text-sm capitalize text-slate-500">{{ activePlace.type || 'facility' }}</p>
                             <p class="mt-3 text-sm leading-6 text-slate-600">
-                                {{ activePlace.description || 'This location is available on the current floor.' }}
+                                {{ activePlace.description || 'This destination is available on the current floor.' }}
                             </p>
                             <div class="mt-5 flex gap-2">
                                 <button type="button" class="flex-1 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500">
@@ -198,21 +206,22 @@ const selectPlace = (place) => {
                             </div>
                         </div>
                         <div v-else class="mt-3 text-sm text-slate-500">
-                            No place selected yet.
+                            Select a destination on the map or in the results list.
                         </div>
                     </div>
 
                     <div class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                         <div class="mb-3 flex items-center justify-between">
                             <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Results</p>
-                            <span class="text-xs text-slate-500">{{ places.length }} matches</span>
+                            <span class="text-xs text-slate-500">{{ resultSummary }}</span>
                         </div>
-                        <div class="space-y-2"> 
+                        <div class="space-y-2">
                             <button
                                 v-for="place in places"
                                 :key="place.id"
                                 type="button"
-                                class="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-left hover:border-indigo-200 hover:bg-indigo-50"
+                                class="flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition hover:border-indigo-200 hover:bg-indigo-50"
+                                :class="activePlace?.id === place.id ? 'border-indigo-200 bg-indigo-50' : 'border-slate-200 bg-white'"
                                 @click="selectPlace(place)"
                             >
                                 <div>

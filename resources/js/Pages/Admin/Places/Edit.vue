@@ -1,9 +1,14 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import PlaceForm from '@/Components/Admin/PlaceForm.vue';
-import { Head, router } from '@inertiajs/vue3';
+import { Head, router, usePage } from '@inertiajs/vue3';
+import { computed } from 'vue';
 
 const props = defineProps({
+    building: {
+        type: Object,
+        required: true,
+    },
     floor: {
         type: Object,
         required: true,
@@ -14,8 +19,16 @@ const props = defineProps({
     },
 });
 
+const page = usePage();
+const errors = computed(() => page.props.errors ?? {});
+
 const submit = (form) => {
-    router.put(route('admin.floors.places.update', [props.floor.id, props.place.id]), form);
+    router.put(route('admin.floors.places.update', [props.floor.id, props.place.id]), form, {
+        preserveScroll: true,
+        onError: () => {
+            // Inertia exposes the backend validation messages in page.props.errors.
+        },
+    });
 };
 </script>
 
@@ -24,13 +37,21 @@ const submit = (form) => {
 
     <AuthenticatedLayout>
         <template #header>
-            <h2 class="text-xl font-semibold text-gray-800">Edit place</h2>
+            <div class="flex items-center justify-between gap-4">
+                <div>
+                    <div class="text-sm font-medium uppercase tracking-wide text-indigo-600">Edit place</div>
+                    <h2 class="text-xl font-semibold text-gray-800">{{ building.name }} · {{ floor.name }}</h2>
+                </div>
+            </div>
         </template>
 
-        <div class="mx-auto max-w-2xl px-4 py-8 sm:px-6 lg:px-8">
+        <div class="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:px-8">
             <div class="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
                 <PlaceForm
+                    :building="building"
+                    :floor="floor"
                     :place="place"
+                    :errors="errors"
                     submit-label="Update place"
                     :cancel-route="route('admin.floors.places.index', floor.id)"
                     @submit="submit"
