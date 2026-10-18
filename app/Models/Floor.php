@@ -36,9 +36,13 @@ class Floor extends Model
         return $this->hasMany(NavigationNode::class)->orderBy('id');
     }
 
+    public function navigationEdges()
+    {
+        return $this->hasManyThrough(NavigationEdge::class, NavigationNode::class, 'floor_id', 'from_node_id');
+    }
+
     public function places()
     {
         return $this->hasMany(Place::class)->orderBy('name');
     }
 }
-

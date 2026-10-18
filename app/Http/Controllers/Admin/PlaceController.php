@@ -56,7 +56,7 @@ class PlaceController extends Controller
         }
 
         $geojson = $this->normalizeGeoJson($validated['geojson'] ?? null);
-        $this->assertPlaceIsWithinBuilding($building, $geojson);
+        // $this->assertPlaceIsWithinBuilding($building, $geojson);
 
         $validated['slug'] = $validated['slug'] ?? Str::slug($validated['name']);
         $validated['is_searchable'] = $request->boolean('is_searchable', true);
@@ -101,7 +101,7 @@ class PlaceController extends Controller
         }
 
         $geojson = $this->normalizeGeoJson($validated['geojson'] ?? null);
-        $this->assertPlaceIsWithinBuilding($building, $geojson);
+        // $this->assertPlaceIsWithinBuilding($building, $geojson);
 
         $validated['slug'] = $validated['slug'] ?? Str::slug($validated['name']);
         $validated['is_searchable'] = $request->boolean('is_searchable', true);

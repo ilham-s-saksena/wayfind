@@ -75,7 +75,13 @@ class MapController extends Controller
             'buildingGeojson' => $this->buildBuildingsGeoJson($buildings),
             'floorGeojson' => $this->buildFloorGeoJson($floor, $places, $building),
             'mapGeojson' => $this->buildFloorGeoJson($floor, $places, $building),
+            'navigationGraph' => $this->buildNavigationGraph($floor),
         ]);
+    }
+
+    public function navigation(Floor $floor)
+    {
+        return response()->json($this->buildNavigationGraph($floor));
     }
 
     protected function emptyGeoJson(): array
@@ -117,6 +123,7 @@ class MapController extends Controller
     protected function buildFloorGeoJson(?Floor $floor, $places, ?Building $building = null): array
     {
         $features = [];
+        $seenNavigationKeys = [];
 
         if ($building && is_array($building->geojson) && ($building->geojson['features'] ?? false)) {
             foreach ($building->geojson['features'] as $feature) {
@@ -141,6 +148,11 @@ class MapController extends Controller
 
         if ($floor && is_array($floor->map_data) && is_array($floor->map_data['features'] ?? null)) {
             foreach ($floor->map_data['features'] as $feature) {
+                $navigationKey = $this->navigationFeatureKey($feature);
+                if ($navigationKey !== null) {
+                    $seenNavigationKeys[$navigationKey] = true;
+                }
+
                 $features[] = $feature;
             }
         }
@@ -148,6 +160,77 @@ class MapController extends Controller
         return [
             'type' => 'FeatureCollection',
             'features' => $features,
+        ];
+    }
+
+    protected function navigationFeatureKey(array $feature): ?string
+    {
+        $kind = $feature['properties']['kind'] ?? $feature['properties']['type'] ?? null;
+        if ($kind !== 'navigation') {
+            return null;
+        }
+
+        $geometry = $feature['geometry'] ?? null;
+        if (($geometry['type'] ?? null) !== 'LineString') {
+            return null;
+        }
+
+        return json_encode($geometry['coordinates'] ?? []);
+    }
+
+    protected function navigationKeyFromEdge(array $edge): ?string
+    {
+        if (! isset($edge['from']['x'], $edge['from']['y'], $edge['to']['x'], $edge['to']['y'])) {
+            return null;
+        }
+
+        return json_encode([
+            [$edge['from']['x'], $edge['from']['y']],
+            [$edge['to']['x'], $edge['to']['y']],
+        ]);
+    }
+
+    protected function buildNavigationGraph(?Floor $floor): array
+    {
+        if (! $floor) {
+            return [
+                'nodes' => [],
+                'edges' => [],
+            ];
+        }
+
+        $nodes = $floor->navigationNodes()->orderBy('created_at')->get()->map(function ($node) {
+            return [
+                'id' => $node->id,
+                'type' => $node->type,
+                'x' => (float) $node->x,
+                'y' => (float) $node->y,
+            ];
+        })->values()->all();
+
+        $edges = $floor->navigationNodes()->with('outgoingEdges.toNode')->get()->flatMap(function ($node) {
+            return $node->outgoingEdges->map(function ($edge) use ($node) {
+                return [
+                    'id' => $edge->id,
+                    'from_node_id' => $node->id,
+                    'to_node_id' => $edge->toNode?->id,
+                    'distance' => (float) $edge->distance,
+                    'accessible' => (bool) $edge->accessible,
+                    'from' => [
+                        'x' => (float) $node->x,
+                        'y' => (float) $node->y,
+                    ],
+                    'to' => [
+                        'x' => (float) ($edge->toNode?->x ?? 0),
+                        'y' => (float) ($edge->toNode?->y ?? 0),
+                    ],
+                ];
+            });
+        })->filter(fn ($edge) => ! empty($edge['to_node_id']))->values()->all();
+
+        return [
+            'nodes' => $nodes,
+            'edges' => $edges,
         ];
     }
 
