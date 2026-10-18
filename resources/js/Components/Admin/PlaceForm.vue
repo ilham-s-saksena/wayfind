@@ -141,7 +141,7 @@ const sanitizePlaceGeojson = (value) => {
     };
 };
 
-const mapMode = computed(() => (props.floor?.map_data?.features?.length ? 'indoor' : 'geo'));
+const mapMode = computed(() => (props.floor?.background_image ? 'indoor' : 'geo'));
 const validationMessage = ref('');
 const serverErrorMessage = computed(() => {
     const errorValues = Object.values(props.errors ?? {}).filter((value) => typeof value === 'string' && value.trim() !== '');
@@ -253,6 +253,8 @@ const onMapChange = (value) => {
                 :background-opacity="floor?.background_opacity ?? 0.5"
                 :map-center="[0, 0]"
                 :map-zoom="1"
+                :read-only-feature-kinds="['navigation']"
+                :draw-mode="'mixed'"
                 feature-kind="place"
                 :feature-type="form.type || 'room'"
                 @change="onMapChange"
