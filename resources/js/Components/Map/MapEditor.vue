@@ -45,6 +45,14 @@ const props = defineProps({
         type: String,
         default: 'building',
     },
+    drawMode: {
+        type: String,
+        default: 'mixed',
+    },
+    readOnlyFeatureKinds: {
+        type: Array,
+        default: () => [],
+    },
 });
 
 const emit = defineEmits(['change', 'feature-selected']);
@@ -74,36 +82,7 @@ const normalizeMapData = (value = props.mapData) => {
     };
 };
 
-const isIndoorMap = (value = props.mapData) => {
-    if (!value || !Array.isArray(value.features)) {
-        return props.mode === 'indoor';
-    }
-
-    const hasIndoorHint = value.features.some((feature) => {
-        const propsList = feature?.properties ?? {};
-        return propsList.kind === 'floor' || propsList.kind === 'navigation' || propsList.kind === 'room' || propsList.type === 'room' || propsList.type === 'navigation';
-    });
-
-    let maxAbs = 0;
-    const walk = (input) => {
-        if (Array.isArray(input)) {
-            input.forEach(walk);
-            return;
-        }
-
-        if (typeof input === 'number') {
-            maxAbs = Math.max(maxAbs, Math.abs(input));
-        }
-    };
-
-    value.features.forEach((feature) => {
-        if (feature?.geometry?.coordinates) {
-            walk(feature.geometry.coordinates);
-        }
-    });
-
-    return props.mode === 'indoor' || hasIndoorHint || maxAbs > 180;
-};
+const isIndoorMap = () => props.mode === 'indoor';
 
 const buildStyle = (feature) => {
     const kind = feature?.properties?.kind ?? feature?.properties?.type ?? 'feature';
@@ -184,6 +163,16 @@ const renderGeoJson = () => {
         style: (feature) => buildStyle(feature),
         pointToLayer: (feature, latlng) => L.circleMarker(latlng, buildPointOptions(feature)),
         onEachFeature: (feature, layer) => {
+            const kind = feature?.properties?.kind ?? feature?.properties?.type ?? '';
+            const isReadOnly = (props.readOnlyFeatureKinds ?? []).includes(kind);
+
+            if (isReadOnly) {
+                layer.options.pmIgnore = true;
+                if (typeof layer.pm?.disable === 'function') {
+                    layer.pm.disable();
+                }
+            }
+
             if (feature?.properties?.name) {
                 layer.bindTooltip(feature.properties.name, { direction: 'top', opacity: 0.9 });
             }
@@ -267,6 +256,50 @@ const collectFeatures = () => {
     };
 };
 
+const getFeatureKind = () => {
+    if (props.drawMode === 'navigation') {
+        return 'navigation';
+    }
+
+    return props.featureKind ?? 'feature';
+};
+
+const getFeatureType = () => {
+    if (props.drawMode === 'navigation') {
+        return 'navigation';
+    }
+
+    return props.featureType ?? getFeatureKind();
+};
+
+const getDrawControls = () => {
+    if (props.drawMode === 'navigation') {
+        return {
+            position: 'topleft',
+            drawCircle: false,
+            drawRectangle: false,
+            drawCircleMarker: false,
+            drawMarker: false,
+            drawPolygon: false,
+            drawPolyline: true,
+            editMode: true,
+            removalMode: true,
+        };
+    }
+
+    return {
+        position: 'topleft',
+        drawCircle: false,
+        drawRectangle: false,
+        drawCircleMarker: false,
+        drawMarker: true,
+        drawPolygon: true,
+        drawPolyline: true,
+        editMode: true,
+        removalMode: true,
+    };
+};
+
 const initMap = () => {
     if (!mapContainer.value) {
         return;
@@ -295,17 +328,8 @@ const initMap = () => {
         });
     });
 
-    map.pm.addControls({
-        position: 'topleft',
-        drawCircle: false,
-        drawRectangle: false,
-        drawCircleMarker: false,
-        drawMarker: true,
-        drawPolygon: true,
-        drawPolyline: true,
-        editMode: true,
-        removalMode: true,
-    });
+    map.pm.removeControls();
+    map.pm.addControls(getDrawControls());
 
     map.on('pm:create', (event) => {
         const feature = event.layer.toGeoJSON();
@@ -313,12 +337,15 @@ const initMap = () => {
             return;
         }
 
+        const featureKind = getFeatureKind();
+        const featureType = getFeatureType();
+
         feature.id = feature.id ?? `feature-${Date.now()}-${Math.random()}`;
         feature.properties = {
             ...(feature.properties ?? {}),
             name: feature.properties?.name ?? 'New feature',
-            kind: feature.properties?.kind ?? props.featureKind,
-            type: feature.properties?.type ?? props.featureType,
+            kind: feature.properties?.kind ?? featureKind,
+            type: feature.properties?.type ?? featureType,
         };
 
         event.layer.feature = feature;
@@ -352,6 +379,18 @@ watch(
         renderGeoJson();
     },
     { deep: true },
+);
+
+watch(
+    () => props.drawMode,
+    () => {
+        if (!ready || !map) {
+            return;
+        }
+
+        map.pm.removeControls();
+        map.pm.addControls(getDrawControls());
+    },
 );
 
 watch(

@@ -15,57 +15,48 @@ const props = defineProps({
         type: Object,
         default: null,
     },
+    userLocation: {
+        type: Object,
+        default: null,
+    },
+    mode: {
+        type: String,
+        default: 'geo',
+    },
 });
 
 const emit = defineEmits(['place-selected']);
 const mapContainer = ref(null);
 let map = null;
 let geoJsonLayer = null;
+let userLocationMarker = null;
+let hasCenteredOnUserLocation = false;
 
 const defaultData = () => ({
     type: 'FeatureCollection',
     features: [],
 });
 
-const isOutdoorFeature = (feature) => {
-    const geometry = feature?.geometry;
-    if (!geometry || !Array.isArray(geometry.coordinates)) {
-        return false;
-    }
+const isGeoMap = () => props.mode === 'geo';
 
-    const numbers = [];
-    const walk = (value) => {
-        if (!Array.isArray(value)) {
-            return;
-        }
-
-        value.forEach((item) => {
-            if (Array.isArray(item)) {
-                walk(item);
-                return;
-            }
-
-            if (typeof item === 'number') {
-                numbers.push(item);
-            }
-        });
-    };
-
-    walk(geometry.coordinates);
-
-    if (numbers.length === 0) {
-        return false;
-    }
-
-    return numbers.some((value) => Math.abs(value) <= 180 && value !== 0);
-};
+const isValidUserLocation = (location) => (
+    location
+    && Number.isFinite(location.latitude)
+    && Number.isFinite(location.longitude)
+    && Math.abs(location.latitude) <= 90
+    && Math.abs(location.longitude) <= 180
+);
 
 const isIndoorData = (data = props.geojson) => {
     if (!data || !Array.isArray(data.features)) {
         return false;
     }
 
-    if (data.features.some((feature) => isOutdoorFeature(feature))) {
+    if (props.mode === 'indoor') {
+        return true;
+    }
+
+    if (props.mode === 'geo') {
         return false;
     }
 
@@ -121,6 +112,42 @@ const pointStyle = (feature) => ({
     weight: 2,
 });
 
+const centerOnUserLocation = () => {
+    if (!map || !isValidUserLocation(props.userLocation) || !isGeoMap()) {
+        return;
+    }
+
+    hasCenteredOnUserLocation = true;
+    map.flyTo([props.userLocation.latitude, props.userLocation.longitude], Math.max(map.getZoom(), 16), { animate: true });
+};
+
+const renderUserLocation = () => {
+    if (!map || !isGeoMap()) {
+        return;
+    }
+
+    if (userLocationMarker) {
+        map.removeLayer(userLocationMarker);
+        userLocationMarker = null;
+    }
+
+    if (!isValidUserLocation(props.userLocation)) {
+        return;
+    }
+
+    const icon = L.divIcon({
+        className: 'user-location-marker-wrapper',
+        html: '<div class="user-location-marker"><span class="user-location-dot"></span></div>',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+    });
+
+    userLocationMarker = L.marker([props.userLocation.latitude, props.userLocation.longitude], {
+        icon,
+        zIndexOffset: 1000,
+    }).addTo(map);
+};
+
 const renderMapData = () => {
     if (!map || !mapContainer.value) {
         return;
@@ -156,6 +183,13 @@ const renderMapData = () => {
             layer.feature = feature;
         },
     }).addTo(map);
+
+    renderUserLocation();
+
+    if (isValidUserLocation(props.userLocation) && !hasCenteredOnUserLocation && isGeoMap()) {
+        centerOnUserLocation();
+        return;
+    }
 
     const bounds = geoJsonLayer.getBounds();
     if (bounds && bounds.isValid()) {
@@ -240,6 +274,26 @@ watch(
     { deep: true },
 );
 
+watch(
+    () => props.userLocation,
+    () => {
+        if (!map) {
+            return;
+        }
+
+        renderUserLocation();
+
+        if (isValidUserLocation(props.userLocation) && !hasCenteredOnUserLocation && isGeoMap()) {
+            centerOnUserLocation();
+        }
+    },
+    { deep: true },
+);
+
+defineExpose({
+    centerOnUserLocation,
+});
+
 onBeforeUnmount(() => {
     if (map) {
         map.remove();
@@ -249,7 +303,59 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-    <div class="h-[460px] w-full overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+    <div class="h-screen w-full overflow-hidden bg-slate-100">
         <div ref="mapContainer" class="h-full w-full"></div>
     </div>
 </template>
+
+<style scoped>
+:global(.user-location-marker-wrapper) {
+    background: transparent !important;
+    border: none !important;
+}
+
+:global(.user-location-marker) {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: visible;
+}
+
+:global(.user-location-marker::before) {
+    content: '';
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(14, 165, 233, 0.2);
+    animation: user-location-pulse 1.8s ease-out infinite;
+}
+
+:global(.user-location-dot) {
+    position: relative;
+    display: block;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background-color: #0ea5e9;
+    border: 2px solid #fff;
+    box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.35);
+}
+
+@keyframes user-location-pulse {
+    0% {
+        transform: scale(0.8);
+        opacity: 0.8;
+    }
+
+    100% {
+        transform: scale(2.2);
+        opacity: 0;
+    }
+}
+</style>

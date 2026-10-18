@@ -29,10 +29,149 @@ const editorData = ref(props.mapData ?? {
 const backgroundImage = ref(props.floor.background_image || '');
 const backgroundVisible = ref(props.floor.background_visible ?? true);
 const backgroundOpacity = ref(Number(props.floor.background_opacity ?? 0.5));
+const navigationPathMode = ref(true);
+const validationMessage = ref('');
+const mapMode = computed(() => (backgroundImage.value ? 'indoor' : 'geo'));
+const buildingContext = computed(() => {
+    const features = [];
+
+    if (props.building?.geojson?.features) {
+        features.push(...props.building.geojson.features.map((feature) => ({
+            ...feature,
+            properties: {
+                ...(feature.properties ?? {}),
+                kind: 'building',
+                type: 'building',
+            },
+        })));
+    }
+
+    if (editorData.value?.features) {
+        features.push(...editorData.value.features.map((feature) => ({
+            ...feature,
+            properties: {
+                ...(feature.properties ?? {}),
+                kind: feature.properties?.kind ?? 'floor',
+                type: feature.properties?.type ?? 'floor',
+            },
+        })));
+    }
+
+    return {
+        type: 'FeatureCollection',
+        features,
+    };
+});
 const selectedFeatureId = ref(null);
 const selectedFeature = computed(() => editorData.value.features.find((feature) => feature.id === selectedFeatureId.value) || null);
 const selectedLabel = ref('');
 const selectedType = ref('room');
+
+const pointInPolygon = (point, ring) => {
+    if (!Array.isArray(ring) || ring.length === 0) {
+        return false;
+    }
+
+    let inside = false;
+    const [x, y] = point;
+
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const xi = Number(ring[i][0]);
+        const yi = Number(ring[i][1]);
+        const xj = Number(ring[j][0]);
+        const yj = Number(ring[j][1]);
+        const intersects = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi + 0.00000001) + xi);
+
+        if (intersects) {
+            inside = !inside;
+        }
+    }
+
+    return inside;
+};
+
+const polygonContainsPoint = (polygonCoordinates, point) => {
+    if (!Array.isArray(polygonCoordinates) || polygonCoordinates.length === 0) {
+        return false;
+    }
+
+    const outerRing = polygonCoordinates[0] ?? [];
+    return pointInPolygon(point, outerRing);
+};
+
+const buildingPolygons = computed(() => {
+    if (!props.building?.geojson?.features) {
+        return [];
+    }
+
+    return props.building.geojson.features
+        .filter((feature) => feature?.geometry?.type === 'Polygon' || feature?.geometry?.type === 'MultiPolygon')
+        .flatMap((feature) => {
+            if (feature.geometry.type === 'Polygon') {
+                return [feature.geometry.coordinates];
+            }
+
+            return feature.geometry.coordinates ?? [];
+        });
+});
+
+const lineStaysWithinBuilding = (coordinates) => {
+    if (!Array.isArray(coordinates) || coordinates.length < 2 || buildingPolygons.value.length === 0) {
+        return false;
+    }
+
+    for (let index = 0; index < coordinates.length; index++) {
+        const point = coordinates[index];
+        if (!Array.isArray(point) || point.length < 2) {
+            return false;
+        }
+
+        const isInside = buildingPolygons.value.some((polygon) => polygonContainsPoint(polygon, point));
+        if (!isInside) {
+            return false;
+        }
+    }
+
+    for (let index = 0; index < coordinates.length - 1; index++) {
+        const start = coordinates[index];
+        const end = coordinates[index + 1];
+        const steps = Math.max(6, Math.ceil(Math.hypot(end[0] - start[0], end[1] - start[1]) * 4));
+
+        for (let step = 0; step <= steps; step++) {
+            const ratio = step / steps;
+            const sample = [
+                start[0] + (end[0] - start[0]) * ratio,
+                start[1] + (end[1] - start[1]) * ratio,
+            ];
+
+            const sampleInside = buildingPolygons.value.some((polygon) => polygonContainsPoint(polygon, sample));
+            if (!sampleInside) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+};
+
+const validateNavigationFeatures = (value) => {
+    const features = Array.isArray(value?.features) ? value.features : [];
+    const invalid = features.filter((feature) => {
+        const kind = feature?.properties?.kind ?? feature?.properties?.type ?? '';
+        if (kind !== 'navigation') {
+            return false;
+        }
+
+        const geometry = feature?.geometry ?? null;
+        return geometry?.type === 'LineString' && !lineStaysWithinBuilding(geometry.coordinates ?? []);
+    });
+
+    validationMessage.value = invalid.length > 0
+        ? 'Navigation paths must stay inside the building boundary. Move or redraw the path within the building polygon.'
+        : '';
+
+    return invalid.length === 0;
+};
 
 const updateSelectedFeature = () => {
     if (!selectedFeature.value) {
@@ -83,7 +222,25 @@ const onBackgroundUpload = (event) => {
     reader.readAsDataURL(file);
 };
 
+const onMapChange = (value) => {
+    const filteredFeatures = (value?.features ?? []).filter((feature) => {
+        const kind = feature?.properties?.kind ?? feature?.properties?.type ?? '';
+        return kind !== 'building';
+    });
+
+    editorData.value = {
+        type: 'FeatureCollection',
+        features: filteredFeatures,
+    };
+
+    validateNavigationFeatures(editorData.value);
+};
+
 const saveMap = () => {
+    if (!validateNavigationFeatures(editorData.value)) {
+        return;
+    }
+
     router.put(route('admin.buildings.floors.saveMapData', [props.building.id, props.floor.id]), {
         map_data: editorData.value,
         background_image: backgroundImage.value,
@@ -118,24 +275,36 @@ const saveMap = () => {
                         <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Editor controls</p>
                         <p class="mt-1 text-sm text-slate-600">Draw rooms, corridors, points of interest, or navigation paths directly on the floor plan.</p>
                     </div>
-                    <button type="button" class="inline-flex justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500" @click="saveMap">
-                        Save map data
-                    </button>
+                    <div class="flex items-center gap-3">
+                        <button type="button" class="inline-flex justify-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" @click="navigationPathMode = !navigationPathMode">
+                            {{ navigationPathMode ? 'Navigation mode on' : 'Navigation mode off' }}
+                        </button>
+                        <button type="button" class="inline-flex justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500" @click="saveMap">
+                            Save map data
+                        </button>
+                    </div>
                 </div>
             </div>
 
             <div class="grid gap-6 xl:grid-cols-[2fr_0.8fr]">
                 <MapEditor
-                    :map-data="editorData"
-                    mode="indoor"
+                    :map-data="buildingContext"
+                    :mode="mapMode"
+                    :draw-mode="navigationPathMode ? 'navigation' : 'mixed'"
                     :background-image="backgroundImage"
                     :background-visible="backgroundVisible"
                     :background-opacity="backgroundOpacity"
                     :map-center="[0, 0]"
                     :map-zoom="15"
-                    @change="editorData = $event"
+                    feature-kind="navigation"
+                    feature-type="navigation"
+                    @change="onMapChange"
                     @feature-selected="onFeatureSelected"
                 />
+
+                <div v-if="validationMessage" class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                    {{ validationMessage }}
+                </div>
 
                 <aside class="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                     <div>

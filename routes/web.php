@@ -5,13 +5,13 @@ use App\Http\Controllers\Admin\FloorController;
 use App\Http\Controllers\Admin\PlaceController;
 use App\Http\Controllers\MapController;
 use App\Http\Controllers\ProfileController;
-use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 
 Route::redirect('/', '/map');
 
 Route::get('/map', [MapController::class, 'index'])->name('map');
+Route::get('/floors/{floor}/navigation', [MapController::class, 'navigation'])->name('floors.navigation');
 
 Route::get('/dashboard', function () {
     return Inertia::render('Dashboard');
