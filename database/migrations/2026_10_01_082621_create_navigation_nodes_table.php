@@ -18,8 +18,8 @@ return new class extends Migration
                 ->cascadeOnDelete();
 
             $table->string('type')->default('path');
-            $table->decimal('x', 12, 4)->default(0);
-            $table->decimal('y', 12, 4)->default(0);
+            $table->decimal('x', 12, 8)->default(0);
+            $table->decimal('y', 12, 8)->default(0);
             $table->timestamps();
         });
     }
