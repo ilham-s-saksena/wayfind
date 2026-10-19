@@ -15,6 +15,7 @@ class Place extends Model
         'slug',
         'type',
         'description',
+        'access_node_id',
         'geojson',
         'is_searchable',
         'is_active',
@@ -31,6 +32,11 @@ class Place extends Model
         return $this->belongsTo(Floor::class);
     }
 
+    public function accessNode()
+    {
+        return $this->belongsTo(NavigationNode::class, 'access_node_id');
+    }
+
     public function scopeSearchable($query)
     {
         return $query->where('is_searchable', true)->where('is_active', true);
@@ -41,4 +47,3 @@ class Place extends Model
         return $query->where('is_active', true);
     }
 }
-

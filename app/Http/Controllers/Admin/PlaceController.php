@@ -44,6 +44,7 @@ class PlaceController extends Controller
             'type' => ['nullable', 'string', 'max:100'],
             'description' => ['nullable', 'string'],
             'geojson' => ['required', 'array'],
+            'access_node_id' => ['nullable', 'uuid', 'exists:navigation_nodes,id'],
             'is_searchable' => ['boolean'],
             'is_active' => ['boolean'],
         ]);
@@ -56,7 +57,8 @@ class PlaceController extends Controller
         }
 
         $geojson = $this->normalizeGeoJson($validated['geojson'] ?? null);
-        // $this->assertPlaceIsWithinBuilding($building, $geojson);
+        $this->validateAccessNode($floor, $validated['access_node_id'] ?? null);
+        $this->assertPlaceIsWithinBuilding($building, $geojson);
 
         $validated['slug'] = $validated['slug'] ?? Str::slug($validated['name']);
         $validated['is_searchable'] = $request->boolean('is_searchable', true);
@@ -70,6 +72,8 @@ class PlaceController extends Controller
 
     public function edit(Floor $floor, Place $place)
     {
+        abort_unless($place->floor_id === $floor->id, 404);
+
         $floor->load('building');
 
         return Inertia::render('Admin/Places/Edit', [
@@ -89,6 +93,7 @@ class PlaceController extends Controller
             'type' => ['nullable', 'string', 'max:100'],
             'description' => ['nullable', 'string'],
             'geojson' => ['required', 'array'],
+            'access_node_id' => ['nullable', 'uuid', 'exists:navigation_nodes,id'],
             'is_searchable' => ['boolean'],
             'is_active' => ['boolean'],
         ]);
@@ -101,7 +106,9 @@ class PlaceController extends Controller
         }
 
         $geojson = $this->normalizeGeoJson($validated['geojson'] ?? null);
-        // $this->assertPlaceIsWithinBuilding($building, $geojson);
+        abort_unless($place->floor_id === $floor->id, 404);
+        $this->validateAccessNode($floor, $validated['access_node_id'] ?? null);
+        $this->assertPlaceIsWithinBuilding($building, $geojson);
 
         $validated['slug'] = $validated['slug'] ?? Str::slug($validated['name']);
         $validated['is_searchable'] = $request->boolean('is_searchable', true);
@@ -115,6 +122,8 @@ class PlaceController extends Controller
 
     public function destroy(Floor $floor, Place $place)
     {
+        abort_unless($place->floor_id === $floor->id, 404);
+
         $place->delete();
 
         return redirect()->route('admin.floors.places.index', $floor)->with('success', 'Place removed.');
@@ -135,10 +144,43 @@ class PlaceController extends Controller
             ]);
         }
 
+        $features = array_values(array_filter($features, function ($feature): bool {
+            if (! is_array($feature)) {
+                return false;
+            }
+
+            $properties = $feature['properties'] ?? [];
+            $kind = $properties['kind'] ?? $properties['type'] ?? null;
+            $geometryType = $feature['geometry']['type'] ?? null;
+
+            return $kind !== 'navigation' && in_array($geometryType, ['Point', 'Polygon', 'MultiPolygon'], true);
+        }));
+
+        if ($features === []) {
+            throw ValidationException::withMessages([
+                'geojson' => ['Place geometry must contain a point or polygon. Navigation paths are stored on the floor map.'],
+            ]);
+        }
+
         return [
             'type' => 'FeatureCollection',
-            'features' => array_values(array_filter($features, fn ($feature) => is_array($feature))),
+            'features' => array_map(fn (array $feature): array => [
+                ...$feature,
+                'properties' => [
+                    ...($feature['properties'] ?? []),
+                    'kind' => 'place',
+                ],
+            ], $features),
         ];
+    }
+
+    protected function validateAccessNode(Floor $floor, ?string $accessNodeId): void
+    {
+        if ($accessNodeId !== null && ! $floor->navigationNodes()->whereKey($accessNodeId)->exists()) {
+            throw ValidationException::withMessages([
+                'access_node_id' => ['Choose an access point connected to the selected floor navigation network.'],
+            ]);
+        }
     }
 
     protected function assertPlaceIsWithinBuilding(Building $building, array $geojson): void

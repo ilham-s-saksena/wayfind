@@ -14,11 +14,14 @@ class NavigationEdge extends Model
         'to_node_id',
         'distance',
         'accessible',
+        'authored_feature_id',
+        'geometry',
     ];
 
     protected $casts = [
         'distance' => 'float',
         'accessible' => 'boolean',
+        'geometry' => 'array',
     ];
 
     public function fromNode()
@@ -31,4 +34,3 @@ class NavigationEdge extends Model
         return $this->belongsTo(NavigationNode::class, 'to_node_id');
     }
 }
-
