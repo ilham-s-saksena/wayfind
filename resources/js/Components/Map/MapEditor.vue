@@ -3,7 +3,7 @@ import L from 'leaflet';
 import '@geoman-io/leaflet-geoman-free';
 import '@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css';
 import 'leaflet/dist/leaflet.css';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps({
     mapData: {
@@ -53,18 +53,21 @@ const props = defineProps({
         type: Array,
         default: () => [],
     },
+    selectedFeatureId: {
+        type: [String, Number],
+        default: null,
+    },
+    selectedAccessNodeId: {
+        type: String,
+        default: '',
+    },
 });
 
-const emit = defineEmits(['change', 'feature-selected']);
+const emit = defineEmits(['change', 'feature-selected', 'access-node-selected']);
 const mapContainer = ref(null);
-const editorBackgroundStyle = computed(() => ({
-    backgroundImage: props.backgroundImage ? `url(${props.backgroundImage})` : 'none',
-    opacity: props.backgroundVisible ? props.backgroundOpacity : 0,
-    display: props.backgroundImage ? 'block' : 'none',
-}));
-
 let map = null;
 let geoJsonLayer = null;
+let navigationEndpointLayer = null;
 let backgroundLayer = null;
 let ready = false;
 
@@ -82,13 +85,31 @@ const normalizeMapData = (value = props.mapData) => {
     };
 };
 
-const isIndoorMap = () => props.mode === 'indoor';
+const buildingFeatures = (data = props.mapData) => (data?.features ?? []).filter((feature) => (
+    (feature.properties?.kind ?? feature.properties?.type) === 'building'
+));
+
+const hasGeographicBuildingGeometry = (data = props.mapData) => buildingFeatures(data).some((feature) => {
+    const bounds = L.geoJSON(feature).getBounds();
+
+    return bounds.isValid()
+        && Math.abs(bounds.getWest()) <= 180
+        && Math.abs(bounds.getEast()) <= 180
+        && Math.abs(bounds.getSouth()) <= 90
+        && Math.abs(bounds.getNorth()) <= 90;
+});
+
+const isIndoorMap = (data = props.mapData) => props.mode === 'indoor' && !hasGeographicBuildingGeometry(data);
 
 const buildStyle = (feature) => {
     const kind = feature?.properties?.kind ?? feature?.properties?.type ?? 'feature';
     const isGeo = props.mode === 'geo';
 
     if (kind === 'navigation') {
+        if (props.selectedFeatureId !== null && String(feature?.id) === String(props.selectedFeatureId)) {
+            return { color: '#ea580c', weight: 6, opacity: 1, lineCap: 'round', lineJoin: 'round' };
+        }
+
         return {
             color: '#14b8a6',
             weight: 3,
@@ -140,11 +161,67 @@ const applyBackground = () => {
         return;
     }
 
-    backgroundLayer = L.imageOverlay(props.backgroundImage, [[0, 0], [1200, 800]], {
+    const sourceFeatures = buildingFeatures();
+    const buildingLayer = sourceFeatures.length ? L.geoJSON({ type: 'FeatureCollection', features: sourceFeatures }) : null;
+    const bounds = hasGeographicBuildingGeometry()
+        ? buildingLayer.getBounds()
+        : [[0, 0], [1200, 800]];
+
+    backgroundLayer = L.imageOverlay(props.backgroundImage, bounds, {
         opacity: props.backgroundVisible ? props.backgroundOpacity : 0,
         interactive: false,
     });
     backgroundLayer.addTo(map);
+};
+
+const renderNavigationEndpoints = (data = normalizeMapData()) => {
+    if (!map) {
+        return;
+    }
+
+    if (navigationEndpointLayer) {
+        map.removeLayer(navigationEndpointLayer);
+        navigationEndpointLayer = null;
+    }
+
+    const endpointNodes = new Map();
+    data.features.forEach((feature) => {
+        const properties = feature.properties ?? {};
+        const coordinates = feature.geometry?.coordinates ?? [];
+        if ((properties.kind ?? properties.type) !== 'navigation' || feature.geometry?.type !== 'LineString' || coordinates.length < 2) {
+            return;
+        }
+
+        [[properties.start_node_id, coordinates[0]], [properties.end_node_id, coordinates.at(-1)]].forEach(([nodeId, coordinate]) => {
+            if (!nodeId || !Array.isArray(coordinate)) return;
+            const node = endpointNodes.get(nodeId) ?? { coordinate, degree: 0 };
+            node.degree++;
+            endpointNodes.set(nodeId, node);
+        });
+    });
+    navigationEndpointLayer = L.layerGroup();
+    endpointNodes.forEach(({ coordinate, degree }, nodeId) => {
+        const connected = degree > 1;
+        const selected = String(nodeId) === String(props.selectedAccessNodeId);
+        const marker = L.circleMarker([coordinate[1], coordinate[0]], {
+            radius: selected ? 9 : connected ? 6 : 7,
+            color: selected ? '#4338ca' : connected ? '#0f766e' : '#b45309',
+            fillColor: selected ? '#c7d2fe' : connected ? '#ccfbf1' : '#fffbeb',
+            fillOpacity: 1,
+            weight: selected ? 3 : 2,
+            interactive: props.drawMode === 'place',
+            bubblingMouseEvents: false,
+            pmIgnore: true,
+        });
+
+        if (props.drawMode === 'place') {
+            marker.bindTooltip(selected ? 'Selected destination access point' : connected ? 'Connected junction · click to select' : 'Path endpoint · click to select', { direction: 'top' });
+            marker.on('click', () => emit('access-node-selected', String(nodeId)));
+        }
+
+        marker.addTo(navigationEndpointLayer);
+    });
+    navigationEndpointLayer.addTo(map);
 };
 
 const renderGeoJson = () => {
@@ -185,7 +262,10 @@ const renderGeoJson = () => {
         },
     });
 
+    applyBackground();
     geoJsonLayer.addTo(map);
+
+    renderNavigationEndpoints(data);
 
     if (isIndoorMap(data)) {
         map.setView([400, 300], 1);
@@ -228,27 +308,28 @@ const collectFeatures = () => {
         features.push(feature);
     };
 
-    if (geoJsonLayer) {
-        geoJsonLayer.eachLayer((layer) => {
-            if (layer.feature) {
-                addFeature(layer.feature);
-            }
-        });
-    }
-
-    map.eachLayer((layer) => {
-        if (layer === geoJsonLayer || layer === backgroundLayer) {
+    const addLayerFeature = (layer) => {
+        if (layer instanceof L.LayerGroup) {
+            layer.eachLayer(addLayerFeature);
             return;
         }
 
-        if (layer instanceof L.TileLayer || layer instanceof L.ImageOverlay) {
+        if (layer === backgroundLayer || layer === navigationEndpointLayer || layer instanceof L.TileLayer || layer instanceof L.ImageOverlay) {
             return;
         }
 
-        if (layer.feature) {
-            addFeature(layer.feature);
+        const sourceFeature = layer.feature;
+        if (!sourceFeature) {
+            return;
         }
-    });
+
+        const currentFeature = typeof layer.toGeoJSON === 'function' ? layer.toGeoJSON() : sourceFeature;
+        currentFeature.id = sourceFeature.id ?? sourceFeature.properties?.id;
+        currentFeature.properties = { ...(sourceFeature.properties ?? {}), ...(currentFeature.properties ?? {}) };
+        addFeature(currentFeature);
+    };
+
+    map.eachLayer(addLayerFeature);
 
     return {
         type: 'FeatureCollection',
@@ -282,6 +363,20 @@ const getDrawControls = () => {
             drawMarker: false,
             drawPolygon: false,
             drawPolyline: true,
+            editMode: true,
+            removalMode: true,
+        };
+    }
+
+    if (props.drawMode === 'place') {
+        return {
+            position: 'topleft',
+            drawCircle: false,
+            drawRectangle: false,
+            drawCircleMarker: false,
+            drawMarker: true,
+            drawPolygon: true,
+            drawPolyline: false,
             editMode: true,
             removalMode: true,
         };
@@ -348,11 +443,17 @@ const initMap = () => {
             type: feature.properties?.type ?? featureType,
         };
 
+        if (featureKind === 'navigation' && feature.geometry?.type === 'LineString') {
+            feature.properties.start_node_id = crypto.randomUUID();
+            feature.properties.end_node_id = crypto.randomUUID();
+        }
+
         event.layer.feature = feature;
         emit('change', collectFeatures());
     });
 
-    map.on('pm:remove', () => {
+    map.on('pm:remove', (event) => {
+        event.layer.feature = null;
         emit('change', collectFeatures());
     });
 
@@ -390,6 +491,28 @@ watch(
 
         map.pm.removeControls();
         map.pm.addControls(getDrawControls());
+        renderNavigationEndpoints();
+    },
+);
+
+watch(
+    () => props.selectedFeatureId,
+    () => {
+        if (!geoJsonLayer) return;
+        geoJsonLayer.eachLayer((layer) => {
+            if (typeof layer.setStyle === 'function' && layer.feature) {
+                layer.setStyle(buildStyle(layer.feature));
+            }
+        });
+    },
+);
+
+watch(
+    () => props.selectedAccessNodeId,
+    () => {
+        if (map) {
+            renderNavigationEndpoints();
+        }
     },
 );
 
@@ -437,10 +560,5 @@ onBeforeUnmount(() => {
 <template>
     <div class="relative h-[540px] w-full overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
         <div ref="mapContainer" class="h-full w-full"></div>
-        <div
-            v-if="backgroundImage"
-            class="pointer-events-none absolute inset-0 bg-contain bg-center bg-no-repeat"
-            :style="editorBackgroundStyle"
-        ></div>
     </div>
 </template>

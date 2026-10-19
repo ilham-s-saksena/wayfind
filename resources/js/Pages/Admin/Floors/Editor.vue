@@ -13,6 +13,10 @@ const props = defineProps({
         type: Object,
         required: true,
     },
+    places: {
+        type: Array,
+        default: () => [],
+    },
     mapData: {
         type: Object,
         default: () => ({
@@ -22,10 +26,16 @@ const props = defineProps({
     },
 });
 
-const editorData = ref(props.mapData ?? {
-    type: 'FeatureCollection',
-    features: [],
-});
+const editorData = ref((props.mapData?.features ?? []).reduce((collection, feature) => {
+    const id = feature.id ?? `feature-${crypto.randomUUID()}`;
+    const properties = { ...(feature.properties ?? {}) };
+    if ((properties.kind ?? properties.type) === 'navigation' && feature.geometry?.type === 'LineString') {
+        properties.start_node_id ??= crypto.randomUUID();
+        properties.end_node_id ??= crypto.randomUUID();
+    }
+    collection.features.push({ ...feature, id, properties });
+    return collection;
+}, { type: 'FeatureCollection', features: [] }));
 const backgroundImage = ref(props.floor.background_image || '');
 const backgroundVisible = ref(props.floor.background_visible ?? true);
 const backgroundOpacity = ref(Number(props.floor.background_opacity ?? 0.5));
@@ -64,6 +74,130 @@ const buildingContext = computed(() => {
 });
 const selectedFeatureId = ref(null);
 const selectedFeature = computed(() => editorData.value.features.find((feature) => feature.id === selectedFeatureId.value) || null);
+const isValidNavigationNodeId = (nodeId) => typeof nodeId === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(nodeId);
+const navigationEndpoints = computed(() => (editorData.value.features ?? []).flatMap((feature) => {
+    const properties = feature.properties ?? {};
+    const coordinates = feature.geometry?.coordinates ?? [];
+    if ((properties.kind ?? properties.type) !== 'navigation' || feature.geometry?.type !== 'LineString' || coordinates.length < 2) {
+        return [];
+    }
+
+    const endpoints = [
+        { featureId: feature.id, role: 'endpoint', nodeId: properties.start_node_id, label: `${properties.name || 'Path'} · start`, coordinate: coordinates[0] },
+        { featureId: feature.id, role: 'endpoint', nodeId: properties.end_node_id, label: `${properties.name || 'Path'} · end`, coordinate: coordinates.at(-1) },
+    ];
+
+    const bends = coordinates.slice(1, -1).map((coordinate, index) => ({
+        featureId: feature.id,
+        role: 'bend',
+        nodeId: null,
+        token: `${feature.id}:bend:${index + 1}`,
+        coordinate,
+        coordinateIndex: index + 1,
+        label: `${properties.name || 'Path'} · bend ${index + 1}`,
+    }));
+
+    return [...endpoints, ...bends];
+}));
+const navigationConnectionTargets = computed(() => {
+    const seen = new Set();
+    return navigationEndpoints.value.filter((endpoint) => {
+        if (endpoint.featureId === selectedFeature.value?.id) return false;
+        const key = endpoint.nodeId || endpoint.token;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+});
+const placesWithMissingAccess = computed(() => {
+    const nodeIds = new Set(navigationEndpoints.value.map((endpoint) => endpoint.nodeId).filter(Boolean));
+
+    return props.places.filter((place) => place.access_node_id && !nodeIds.has(place.access_node_id));
+});
+const selectedNavigation = computed(() => selectedFeature.value && (selectedFeature.value.properties?.kind ?? selectedFeature.value.properties?.type) === 'navigation');
+const navigationDiagnostics = computed(() => {
+    const endpoints = navigationEndpoints.value;
+    const graphEndpoints = endpoints.filter((endpoint) => endpoint.role === 'endpoint');
+    const knownNodes = new Set(graphEndpoints.map((endpoint) => endpoint.nodeId).filter(isValidNavigationNodeId));
+    const degree = new Map();
+    const adjacency = new Map();
+
+    endpoints.forEach((endpoint) => {
+        if (!endpoint.nodeId) {
+            return;
+        }
+        degree.set(endpoint.nodeId, (degree.get(endpoint.nodeId) ?? 0) + 1);
+        if (!adjacency.has(endpoint.nodeId)) adjacency.set(endpoint.nodeId, new Set());
+    });
+    (editorData.value.features ?? []).forEach((feature) => {
+        if ((feature.properties?.kind ?? feature.properties?.type) !== 'navigation') return;
+        const start = feature.properties?.start_node_id;
+        const end = feature.properties?.end_node_id;
+        if (!knownNodes.has(start) || !knownNodes.has(end)) return;
+        adjacency.get(start)?.add(end);
+        adjacency.get(end)?.add(start);
+    });
+
+    let components = 0;
+    let coordinateMismatches = 0;
+    let selfLoops = 0;
+    let invalidGeometry = 0;
+    const nodeCoordinates = new Map();
+    const coincidentNodes = new Map();
+    const navigationFeatures = (editorData.value.features ?? []).filter((feature) => (
+        (feature.properties?.kind ?? feature.properties?.type) === 'navigation'
+    ));
+    navigationFeatures.forEach((feature) => {
+        const coordinates = feature.geometry?.coordinates;
+        if (feature.geometry?.type !== 'LineString' || !Array.isArray(coordinates) || coordinates.length < 2) {
+            invalidGeometry++;
+        }
+    });
+    endpoints.forEach((endpoint) => {
+        if (!endpoint.nodeId) return;
+        const existing = nodeCoordinates.get(endpoint.nodeId);
+        if (existing && (Number(existing[0]) !== Number(endpoint.coordinate[0]) || Number(existing[1]) !== Number(endpoint.coordinate[1]))) {
+            coordinateMismatches++;
+        } else {
+            nodeCoordinates.set(endpoint.nodeId, endpoint.coordinate);
+        }
+        const coordinateKey = `${Number(endpoint.coordinate[0]).toFixed(8)}:${Number(endpoint.coordinate[1]).toFixed(8)}`;
+        const nodeIds = coincidentNodes.get(coordinateKey) ?? new Set();
+        nodeIds.add(endpoint.nodeId);
+        coincidentNodes.set(coordinateKey, nodeIds);
+    });
+    (editorData.value.features ?? []).forEach((feature) => {
+        if ((feature.properties?.kind ?? feature.properties?.type) === 'navigation'
+            && feature.properties?.start_node_id
+            && feature.properties.start_node_id === feature.properties?.end_node_id) {
+            selfLoops++;
+        }
+    });
+    const visited = new Set();
+    adjacency.forEach((_, nodeId) => {
+        if (visited.has(nodeId)) return;
+        components++;
+        const pending = [nodeId];
+        while (pending.length) {
+            const current = pending.pop();
+            if (visited.has(current)) continue;
+            visited.add(current);
+            adjacency.get(current)?.forEach((neighbor) => pending.push(neighbor));
+        }
+    });
+
+    return {
+        paths: navigationFeatures.length,
+        dangling: [...degree.values()].filter((count) => count === 1).length,
+        components,
+        missingIds: graphEndpoints.filter((endpoint) => !isValidNavigationNodeId(endpoint.nodeId)).length,
+        coordinateMismatches,
+        selfLoops,
+        invalidGeometry,
+        coincidentNodes: [...coincidentNodes.values()].reduce((count, ids) => count + Math.max(0, ids.size - 1), 0),
+    };
+});
 const selectedLabel = ref('');
 const selectedType = ref('room');
 
@@ -198,6 +332,61 @@ const updateSelectedFeature = () => {
     };
 };
 
+const connectSelectedEndpoint = (endpointName, nodeId) => {
+    const feature = selectedFeature.value;
+    if (!feature) return;
+    if (!nodeId) {
+        editorData.value = {
+            ...editorData.value,
+            features: editorData.value.features.map((item) => item.id === feature.id
+                ? { ...item, properties: { ...(item.properties ?? {}), [endpointName === 'start' ? 'start_node_id' : 'end_node_id']: crypto.randomUUID() } }
+                : item),
+        };
+        return;
+    }
+    let target = navigationEndpoints.value.find((endpoint) => (endpoint.nodeId === nodeId || endpoint.token === nodeId) && endpoint.featureId !== feature.id);
+    if (!target) return;
+
+    const features = [...editorData.value.features];
+    if (target.coordinateIndex) {
+        const sourceIndex = features.findIndex((item) => item.id === target.featureId);
+        const source = features[sourceIndex];
+        const coordinates = source.geometry.coordinates;
+        const junctionId = crypto.randomUUID();
+        const first = {
+            ...source,
+            geometry: { ...source.geometry, coordinates: coordinates.slice(0, target.coordinateIndex + 1) },
+            properties: { ...source.properties, end_node_id: junctionId },
+        };
+        const second = {
+            ...source,
+            id: `feature-${crypto.randomUUID()}`,
+            geometry: { ...source.geometry, coordinates: coordinates.slice(target.coordinateIndex) },
+            properties: { ...source.properties, name: `${source.properties?.name || 'Path'} (continued)`, start_node_id: junctionId },
+        };
+        features.splice(sourceIndex, 1, first, second);
+        target = { ...target, nodeId: junctionId };
+    }
+
+    editorData.value = {
+        ...editorData.value,
+        features: features.map((item) => {
+            if (item.id !== feature.id) return item;
+            const coordinates = [...(item.geometry.coordinates ?? [])];
+            coordinates[endpointName === 'start' ? 0 : coordinates.length - 1] = [...target.coordinate];
+            return {
+                ...item,
+                geometry: { ...item.geometry, coordinates },
+                properties: {
+                    ...(item.properties ?? {}),
+                    [endpointName === 'start' ? 'start_node_id' : 'end_node_id']: target.nodeId || nodeId,
+                },
+            };
+        }),
+    };
+    validateNavigationFeatures(editorData.value);
+};
+
 const onFeatureSelected = (feature) => {
     if (!feature) {
         selectedFeatureId.value = null;
@@ -237,7 +426,17 @@ const onMapChange = (value) => {
 };
 
 const saveMap = () => {
+    if (placesWithMissingAccess.value.length > 0) {
+        validationMessage.value = `Reconnect or clear the navigation access point for ${placesWithMissingAccess.value.map((place) => place.name).join(', ')} before removing those paths.`;
+        return;
+    }
+
     if (!validateNavigationFeatures(editorData.value)) {
+        return;
+    }
+
+    if (navigationDiagnostics.value.coordinateMismatches || navigationDiagnostics.value.selfLoops || navigationDiagnostics.value.invalidGeometry) {
+        validationMessage.value = 'Fix malformed paths and endpoint connections before saving. Connected endpoints must share a coordinate, and a path cannot connect to itself.';
         return;
     }
 
@@ -273,11 +472,11 @@ const saveMap = () => {
                 <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
                         <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Editor controls</p>
-                        <p class="mt-1 text-sm text-slate-600">Draw rooms, corridors, points of interest, or navigation paths directly on the floor plan.</p>
+                        <p class="mt-1 text-sm text-slate-600">Use the polyline tool, click along walkable corridors to add bends, then double-click to finish. Select a path and connect either endpoint to an existing endpoint or bend to create an explicit junction.</p>
                     </div>
                     <div class="flex items-center gap-3">
                         <button type="button" class="inline-flex justify-center rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" @click="navigationPathMode = !navigationPathMode">
-                            {{ navigationPathMode ? 'Navigation mode on' : 'Navigation mode off' }}
+                            {{ navigationPathMode ? 'Navigation paths: on' : 'Navigation paths: off' }}
                         </button>
                         <button type="button" class="inline-flex justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500" @click="saveMap">
                             Save map data
@@ -296,6 +495,7 @@ const saveMap = () => {
                     :background-opacity="backgroundOpacity"
                     :map-center="[0, 0]"
                     :map-zoom="15"
+                    :selected-feature-id="selectedFeatureId"
                     feature-kind="navigation"
                     feature-type="navigation"
                     @change="onMapChange"
@@ -304,6 +504,24 @@ const saveMap = () => {
 
                 <div v-if="validationMessage" class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
                     {{ validationMessage }}
+                </div>
+
+                <div class="mt-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
+                    Navigation network: {{ navigationDiagnostics.paths }} paths · {{ navigationDiagnostics.components }} connected component(s) · {{ navigationDiagnostics.dangling }} unconnected endpoint(s).
+                    <span v-if="navigationDiagnostics.missingIds"> {{ navigationDiagnostics.missingIds }} endpoint ID(s) will be assigned when saved.</span>
+                    <span v-if="navigationDiagnostics.coordinateMismatches || navigationDiagnostics.selfLoops" class="font-medium text-rose-700"> {{ navigationDiagnostics.coordinateMismatches + navigationDiagnostics.selfLoops }} invalid connection(s) need repair.</span>
+                    <span v-if="navigationDiagnostics.invalidGeometry" class="font-medium text-rose-700"> {{ navigationDiagnostics.invalidGeometry }} malformed path(s) need repair.</span>
+                    <span v-if="navigationDiagnostics.coincidentNodes" class="font-medium text-amber-700"> {{ navigationDiagnostics.coincidentNodes }} coincident endpoint(s) have separate node IDs; connect them only if they are a real junction.</span>
+                    <span v-if="navigationDiagnostics.components > 1" class="font-medium text-amber-700"> These paths form separate components; connect them if they should be reachable from one another.</span>
+                    <span v-else-if="!navigationDiagnostics.missingIds"> Nearby lines remain disconnected until you connect their endpoints.</span>
+                </div>
+                <div v-if="placesWithMissingAccess.length" class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    {{ placesWithMissingAccess.map((place) => place.name).join(', ') }} use navigation nodes that are missing from this edited network. Reassign their access point in the Place Editor before saving.
+                </div>
+                <div class="mt-2 flex flex-wrap gap-4 px-1 text-xs text-slate-600">
+                    <span class="inline-flex items-center gap-2"><span class="h-3 w-3 rounded-full border-2 border-teal-700 bg-teal-100"></span>Connected junction</span>
+                    <span class="inline-flex items-center gap-2"><span class="h-3 w-3 rounded-full border-2 border-amber-700 bg-amber-50"></span>Unconnected endpoint</span>
+                    <span class="inline-flex items-center gap-2"><span class="h-1 w-5 rounded bg-orange-600"></span>Selected path</span>
                 </div>
 
                 <aside class="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -326,11 +544,24 @@ const saveMap = () => {
                     <div>
                         <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Selected feature</p>
                         <div v-if="selectedFeature" class="mt-3 space-y-3">
+                            <div v-if="selectedNavigation" class="space-y-3 rounded-lg bg-teal-50 p-3">
+                                <p class="text-sm font-medium text-teal-900">Path connections</p>
+                                <label v-for="endpoint in ['start', 'end']" :key="endpoint" class="block text-sm text-slate-700">
+                                    Connect {{ endpoint }} endpoint to
+                                    <select class="mt-1 w-full rounded-md border-gray-300 text-sm" :value="selectedFeature.properties?.[`${endpoint}_node_id`] ?? ''" @change="connectSelectedEndpoint(endpoint, $event.target.value)">
+                                        <option value="">Keep separate</option>
+                                        <option v-for="candidate in navigationConnectionTargets" :key="candidate.nodeId || candidate.token" :value="candidate.nodeId || candidate.token">
+                                            {{ candidate.label }}
+                                        </option>
+                                    </select>
+                                </label>
+                                <p class="text-xs text-teal-800">Selecting an endpoint creates an explicit shared junction. Line crossings and nearby endpoints do not connect automatically.</p>
+                            </div>
                             <div>
                                 <label class="block text-sm font-medium text-slate-700">Name</label>
                                 <input v-model="selectedLabel" type="text" class="mt-1 w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500" @input="updateSelectedFeature" />
                             </div>
-                            <div>
+                            <div v-if="!selectedNavigation">
                                 <label class="block text-sm font-medium text-slate-700">Type</label>
                                 <select v-model="selectedType" class="mt-1 w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500" @change="updateSelectedFeature">
                                     <option value="room">Room</option>
