@@ -4,7 +4,7 @@ import PrimaryButton from '@/Components/PrimaryButton.vue';
 import SecondaryButton from '@/Components/SecondaryButton.vue';
 import TextInput from '@/Components/TextInput.vue';
 import MapEditor from '@/Components/Map/MapEditor.vue';
-import { computed, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { Link } from '@inertiajs/vue3';
 
 const props = defineProps({
@@ -98,12 +98,13 @@ const mapContext = computed(() => {
     };
 });
 
-const form = props.place
+const form = reactive(props.place
     ? {
           name: props.place.name,
           slug: props.place.slug,
           type: props.place.type ?? 'room',
           description: props.place.description ?? '',
+          access_node_id: props.place.access_node_id ?? '',
           geojson: normalizeGeometry(props.place.geojson),
           is_searchable: props.place.is_searchable,
           is_active: props.place.is_active,
@@ -113,13 +114,37 @@ const form = props.place
           slug: '',
           type: 'room',
           description: '',
+          access_node_id: '',
           geojson: {
               type: 'FeatureCollection',
               features: [],
           },
           is_searchable: true,
           is_active: true,
-      };
+      });
+
+const navigationAccessNodes = computed(() => {
+    const nodes = new Map();
+
+    for (const feature of props.floor?.map_data?.features ?? []) {
+        const properties = feature.properties ?? {};
+        const coordinates = feature.geometry?.coordinates ?? [];
+        if ((properties.kind ?? properties.type) !== 'navigation' || feature.geometry?.type !== 'LineString' || coordinates.length < 2) {
+            continue;
+        }
+
+        [
+            { id: properties.start_node_id, coordinate: coordinates[0], label: `${properties.name || 'Path'} · start` },
+            { id: properties.end_node_id, coordinate: coordinates.at(-1), label: `${properties.name || 'Path'} · end` },
+        ].forEach((node) => {
+            if (node.id && !nodes.has(node.id)) {
+                nodes.set(node.id, { ...node, coordinateLabel: `${Number(node.coordinate[0]).toFixed(6)}, ${Number(node.coordinate[1]).toFixed(6)}` });
+            }
+        });
+    }
+
+    return [...nodes.values()];
+});
 
 const sanitizePlaceGeojson = (value) => {
     if (!value || !Array.isArray(value.features)) {
@@ -136,7 +161,10 @@ const sanitizePlaceGeojson = (value) => {
                 return true;
             }
 
-            return !['building', 'floor'].includes(feature.properties.kind ?? '') && !['building', 'floor'].includes(feature.properties.type ?? '');
+            const kind = feature.properties.kind ?? feature.properties.type ?? '';
+            const geometryType = feature.geometry?.type;
+
+            return kind !== 'navigation' && ['Point', 'Polygon', 'MultiPolygon'].includes(geometryType);
         }),
     };
 };
@@ -159,6 +187,10 @@ const onMapChange = (value) => {
     }
 
     validationMessage.value = '';
+};
+
+const selectAccessNode = (nodeId) => {
+    form.access_node_id = nodeId;
 };
 </script>
 
@@ -241,7 +273,7 @@ const onMapChange = (value) => {
             <div class="mb-3 flex items-center justify-between">
                 <div>
                     <p class="text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Place geometry</p>
-                    <p class="mt-1 text-sm text-slate-600">Draw a point or polygon inside the selected building.</p>
+                    <p class="mt-1 text-sm text-slate-600">Choose the marker tool for a precise destination or the polygon tool for a room boundary.</p>
                 </div>
             </div>
 
@@ -254,11 +286,30 @@ const onMapChange = (value) => {
                 :map-center="[0, 0]"
                 :map-zoom="1"
                 :read-only-feature-kinds="['navigation']"
-                :draw-mode="'mixed'"
+                :selected-access-node-id="form.access_node_id"
+                draw-mode="place"
                 feature-kind="place"
                 :feature-type="form.type || 'room'"
                 @change="onMapChange"
+                @access-node-selected="selectAccessNode"
             />
+
+            <label class="mt-4 block text-sm font-medium text-slate-700">
+                Navigation access point
+                <select v-model="form.access_node_id" class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-sm focus:border-indigo-500 focus:ring-indigo-500">
+                    <option value="">Not connected to navigation</option>
+                    <option v-for="node in navigationAccessNodes" :key="node.id" :value="node.id">
+                        {{ node.label }} · {{ node.coordinateLabel }}
+                    </option>
+                </select>
+            </label>
+            <p class="mt-2 text-xs text-slate-600">Click a visible navigation endpoint or choose one from the list. For a room without a nearby endpoint, first draw a path to its entrance in the Floor Editor. Routes use this selected access point instead of the room center.</p>
+            <p v-if="form.access_node_id" class="mt-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                Access point selected: {{ navigationAccessNodes.find((node) => node.id === form.access_node_id)?.label || 'Choose an available endpoint' }}.
+            </p>
+            <p v-else class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                This place is not reachable from the public map until an access point is selected.
+            </p>
 
             <div v-if="validationMessage" class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
                 {{ validationMessage }}

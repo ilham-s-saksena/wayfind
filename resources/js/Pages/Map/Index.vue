@@ -2,6 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Head, router } from '@inertiajs/vue3';
 import MapView from '@/Components/Map/MapView.vue';
+import {
+    coordinatesFromPlaceFeature,
+    resolveGraphRoute,
+    splitRouteByUserPosition,
+} from '@/lib/navigationRouting';
 
 const props = defineProps({
     buildings: {
@@ -39,18 +44,38 @@ const props = defineProps({
             features: [],
         }),
     },
+    navigationGraph: {
+        type: Object,
+        default: () => ({
+            nodes: [],
+            edges: [],
+        }),
+    },
+    backgroundImage: {
+        type: String,
+        default: '',
+    },
+    backgroundVisible: {
+        type: Boolean,
+        default: true,
+    },
+    backgroundOpacity: {
+        type: Number,
+        default: 0.5,
+    },
 });
 
 const searchTerm = ref(props.search || '');
 const activePlace = ref(props.selectedPlace || props.places[0] || null);
 const isSidebarOpen = ref(false);
 const isNavigationOpen = ref(false);
-const routePreset = ref('');
+const isDestinationModalOpen = ref(true);
 const routeSummary = ref('');
 const currentLocation = ref(null);
 const geolocationStatus = ref('not-requested');
 const geolocationWatcherId = ref(null);
 const mapViewRef = ref(null);
+const isNavigationActive = ref(false);
 
 const debugGeolocation = (message, meta = {}) => {
     if (import.meta.env.DEV) {
@@ -72,6 +97,117 @@ const selectedBuilding = computed(() =>
 const selectedFloor = computed(() =>
     props.floors.find((floor) => floor.id === props.selectedFloorId) || props.floors[0] || null,
 );
+
+const routeState = ref({
+    fullPath: [],
+    completedPath: [],
+    remainingPath: [],
+    progress: 0,
+});
+
+const getPlaceCoordinates = (place) => {
+    const geojson = props.mapGeojson ?? { type: 'FeatureCollection', features: [] };
+    if (place?.access_node_id) {
+        const accessNode = props.navigationGraph?.nodes?.find((node) => String(node.id) === String(place.access_node_id));
+        return accessNode ? [Number(accessNode.x), Number(accessNode.y)] : null;
+    }
+
+    const matchedFeature = (geojson.features ?? []).find((feature) => (
+        String(feature?.properties?.id ?? '') === String(place?.id ?? '')
+        && feature?.geometry?.type === 'Point'
+        && feature?.properties?.kind !== 'place-access'
+    ));
+
+    const fromFeature = coordinatesFromPlaceFeature(matchedFeature);
+    if (fromFeature) {
+        return fromFeature;
+    }
+
+    return null;
+};
+
+const resolveRouteFromGraph = (resetProgress = false) => {
+    const graph = props.navigationGraph ?? { nodes: [], edges: [] };
+
+    if (!activePlace.value || !graph?.nodes?.length) {
+        routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
+        if (activePlace.value && !graph?.nodes?.length) {
+            routeSummary.value = 'No navigation network is configured for this floor.';
+        }
+        return;
+    }
+
+    const placePoint = getPlaceCoordinates(activePlace.value);
+    if (!placePoint) {
+        routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
+        const hasAreaGeometry = (props.mapGeojson?.features ?? []).some((feature) => (
+            String(feature?.properties?.id ?? '') === String(activePlace.value?.id ?? '')
+            && ['Polygon', 'MultiPolygon'].includes(feature?.geometry?.type)
+        ));
+        routeSummary.value = hasAreaGeometry
+            ? 'This destination needs a navigation access point. Set its entrance in the Place Editor.'
+            : 'This destination has no usable point geometry or navigation access point.';
+        return;
+    }
+
+    const hasUserLocation = currentLocation.value
+        && Number.isFinite(currentLocation.value.latitude)
+        && Number.isFinite(currentLocation.value.longitude);
+
+    if (!hasUserLocation) {
+        routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
+        routeSummary.value = 'Allow location access to calculate a route from your current position.';
+        return;
+    }
+
+    const route = resolveGraphRoute(
+        graph,
+        [currentLocation.value.longitude, currentLocation.value.latitude],
+        placePoint,
+    );
+
+    if (!route.reachable || route.fullPath.length < 2) {
+        routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
+        routeSummary.value = route.reason === 'disconnected'
+            ? 'No connected navigation path reaches this destination.'
+            : 'Your position or destination is too far from the mapped navigation paths.';
+        return;
+    }
+
+    if (resetProgress) {
+        routeState.value.progress = 0;
+    }
+
+    let completedPath = [];
+    let remainingPath = [...route.fullPath];
+    let progress = 0;
+
+    if (isNavigationActive.value) {
+        const split = splitRouteByUserPosition(
+            route.fullPath,
+            [currentLocation.value.longitude, currentLocation.value.latitude],
+            resetProgress ? 0 : routeState.value.progress,
+        );
+
+        if (split.deviated) {
+            routeSummary.value = 'You are off route. Recalculating from your current position.';
+            routeState.value.progress = 0;
+        }
+
+        completedPath = split.completedPath;
+        remainingPath = split.remainingPath;
+        progress = split.deviated ? 0 : split.progress;
+    } else {
+        remainingPath = [...route.fullPath];
+    }
+
+    routeState.value = {
+        fullPath: route.fullPath,
+        completedPath,
+        remainingPath,
+        progress,
+    };
+};
 
 const resultSummary = computed(() => {
     if (props.places.length === 0) {
@@ -109,18 +245,43 @@ const locationStatusMessage = computed(() => {
     return '';
 });
 
-const destinationOptions = computed(() => props.places.map((place) => ({
-    id: place.id,
-    label: place.name,
-    value: place.id,
-})));
-
 watch(
     () => props.selectedPlace,
     (value) => {
         activePlace.value = value || props.places[0] || null;
+        isNavigationActive.value = false;
+        routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
     },
     { immediate: true },
+);
+
+watch(
+    [() => activePlace.value, () => currentLocation.value, () => props.navigationGraph, () => props.mapGeojson],
+    ([, location], [, previousLocation]) => {
+        if (isNavigationActive.value && routeState.value.fullPath.length > 1 && location && location !== previousLocation) {
+            const split = splitRouteByUserPosition(
+                routeState.value.fullPath,
+                [location.longitude, location.latitude],
+                routeState.value.progress,
+            );
+
+            if (!split.deviated) {
+                routeState.value = {
+                    ...routeState.value,
+                    completedPath: split.completedPath,
+                    remainingPath: split.remainingPath,
+                    progress: split.progress,
+                };
+                return;
+            }
+
+            routeState.value.progress = 0;
+            resolveRouteFromGraph(true);
+            return;
+        }
+        resolveRouteFromGraph();
+    },
+    { deep: true },
 );
 
 const requestCurrentLocation = () => {
@@ -250,33 +411,110 @@ const changeFloor = (floorId) => {
     );
 };
 
-const selectPlace = (place) => {
+const selectPlace = (place, keepDestinationModalOpen = false) => {
     activePlace.value = place;
+    isDestinationModalOpen.value = keepDestinationModalOpen;
+    isNavigationActive.value = false;
+
+    if (place) {
+        routeSummary.value = `Destination selected: ${place.name}. Choose “Navigate Me” to follow the guided route.`;
+    }
+
+    resolveRouteFromGraph(true);
 };
 
-const setRoutePreset = (preset) => {
-    routePreset.value = preset;
-
-    if (preset === 'security-to-office') {
-        routeSummary.value = 'Route set: Security post → Station Head office.';
+const startNavigation = () => {
+    if (!activePlace.value) {
+        routeSummary.value = 'Please select a destination before starting navigation.';
         return;
     }
 
-    if (currentLocation.value) {
-        routeSummary.value = `Route set: current location → ${activePlace?.value?.name ?? 'selected destination'}.`;
+    isNavigationActive.value = true;
+    resolveRouteFromGraph(true);
+
+    if (routeState.value.fullPath.length > 1 && currentLocation.value) {
+        routeSummary.value = `Following route from your current location to ${activePlace.value.name}.`;
+        centerMapOnUser();
         return;
     }
 
-    routeSummary.value = 'Current location is not available. Allow browser location access or choose the security-post route.';
+    if (!currentLocation.value) {
+        routeSummary.value = 'Allow location access before starting navigation.';
+    }
 };
+
 </script>
 
 <template>
     <Head title="Wayfind map" />
 
     <div class="relative h-screen overflow-hidden bg-slate-100">
+        <div v-if="isDestinationModalOpen" class="absolute inset-0 z-[1000] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
+            <div class="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
+                <div class="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                        <p class="text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">Choose destination</p>
+                        <h2 class="mt-1 text-xl font-semibold text-slate-900">Where would you like to go?</h2>
+                    </div>
+                    <button type="button" class="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50" @click="isDestinationModalOpen = false">
+                        Close
+                    </button>
+                </div>
+
+                <div class="space-y-2">
+                    <button
+                        v-for="place in places"
+                        :key="place.id"
+                        type="button"
+                        class="flex w-full items-center justify-between rounded-2xl border px-3 py-3 text-left transition"
+                        :class="activePlace?.id === place.id ? 'border-indigo-200 bg-indigo-50 ring-2 ring-indigo-100' : 'border-slate-200 bg-slate-50 hover:border-indigo-200 hover:bg-indigo-50/60'"
+                        @click="selectPlace(place, true)"
+                    >
+                        <div>
+                            <div class="font-medium text-slate-800">{{ place.name }}</div>
+                            <div class="text-xs text-slate-500">{{ place.slug }}</div>
+                        </div>
+                        <span class="rounded-full bg-white px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-slate-500">
+                            {{ place.access_node_id || getPlaceCoordinates(place) ? (place.type || 'place') : 'Access point missing' }}
+                        </span>
+                    </button>
+                </div>
+
+                <div v-if="routeSummary" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                    {{ routeSummary }}
+                </div>
+
+                <div class="mt-4 flex items-center justify-end gap-2">
+                    <button type="button" class="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50" @click="isDestinationModalOpen = false">
+                        Later
+                    </button>
+                    <button
+                        type="button"
+                        class="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-indigo-300"
+                        :disabled="!activePlace || !currentLocation || routeState.fullPath.length < 2"
+                        @click="startNavigation(); isDestinationModalOpen = false;"
+                    >
+                        Navigate Me
+                    </button>
+                </div>
+            </div>
+        </div>
         <div class="absolute inset-0 z-10">
-            <MapView ref="mapViewRef" mode="geo" :geojson="mapGeojson" :selected-place="activePlace" :user-location="currentLocation" @place-selected="selectPlace" />
+            <MapView
+                ref="mapViewRef"
+                mode="geo"
+                :geojson="mapGeojson"
+                :selected-place="activePlace"
+                :user-location="currentLocation"
+                :route-geometry="routeState.fullPath"
+                :completed-route="routeState.completedPath"
+                :remaining-route="routeState.remainingPath"
+                :route-visible="isNavigationActive || !!activePlace"
+                :background-image="backgroundImage || ''"
+                :background-visible="backgroundVisible"
+                :background-opacity="backgroundOpacity"
+                @place-selected="selectPlace"
+            />
         </div>
 
         <button
@@ -307,10 +545,18 @@ const setRoutePreset = (preset) => {
 
         <div
             v-if="locationStatusMessage"
-            class="absolute left-1/2 top-4 z-30 -translate-x-1/2 rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs font-medium text-slate-700 shadow-sm backdrop-blur-sm"
+            class="absolute left-1/2 top-4 z-30 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs font-medium text-slate-700 shadow-sm backdrop-blur-sm"
             :class="geolocationStatus === 'denied' || geolocationStatus === 'unavailable' || geolocationStatus === 'timeout' || geolocationStatus === 'unsupported' || geolocationStatus === 'error' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-white/95 text-slate-700'"
         >
-            {{ locationStatusMessage }}
+            <span>{{ locationStatusMessage }}</span>
+            <button
+                v-if="['denied', 'unavailable', 'timeout', 'error'].includes(geolocationStatus)"
+                type="button"
+                class="shrink-0 rounded-lg border border-amber-300 bg-white px-2 py-1 font-semibold text-amber-900 hover:bg-amber-100"
+                @click="requestCurrentLocation"
+            >
+                Retry location
+            </button>
         </div>
 
         <div v-if="isNavigationOpen" class="absolute right-4 top-16 z-20 w-80 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-xl backdrop-blur-sm">
@@ -322,25 +568,15 @@ const setRoutePreset = (preset) => {
                 <button
                     type="button"
                     class="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
-                    :class="routePreset === 'security-to-office' ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : ''"
-                    @click="setRoutePreset('security-to-office')"
-                >
-                    <span>Security post → Station Head office</span>
-                </button>
-
-                <button
-                    type="button"
-                    class="flex w-full items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
-                    :class="routePreset === 'current-to-place' ? 'border-indigo-200 bg-indigo-50 text-indigo-700' : ''"
-                    :disabled="!currentLocation || !activePlace"
-                    @click="setRoutePreset('current-to-place')"
+                    :disabled="!activePlace || !currentLocation || routeState.fullPath.length < 2"
+                    @click="startNavigation()"
                 >
                     <span>Current location → {{ activePlace?.name || 'destination' }}</span>
                 </button>
 
                 <label class="block text-xs font-medium uppercase tracking-[0.2em] text-slate-500">Destination</label>
-                <select v-model="activePlace" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100">
-                    <option v-for="place in places" :key="place.id" :value="place">{{ place.name }}</option>
+                <select :value="activePlace?.id || ''" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100" @change="selectPlace(places.find((place) => String(place.id) === $event.target.value) || null)">
+                    <option v-for="place in places" :key="place.id" :value="place.id">{{ place.name }}</option>
                 </select>
             </div>
 

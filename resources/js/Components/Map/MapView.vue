@@ -23,6 +23,34 @@ const props = defineProps({
         type: String,
         default: 'geo',
     },
+    routeGeometry: {
+        type: Array,
+        default: () => [],
+    },
+    completedRoute: {
+        type: Array,
+        default: () => [],
+    },
+    remainingRoute: {
+        type: Array,
+        default: () => [],
+    },
+    routeVisible: {
+        type: Boolean,
+        default: true,
+    },
+    backgroundImage: {
+        type: String,
+        default: '',
+    },
+    backgroundVisible: {
+        type: Boolean,
+        default: true,
+    },
+    backgroundOpacity: {
+        type: Number,
+        default: 0.5,
+    },
 });
 
 const emit = defineEmits(['place-selected']);
@@ -30,7 +58,10 @@ const mapContainer = ref(null);
 let map = null;
 let geoJsonLayer = null;
 let userLocationMarker = null;
-let hasCenteredOnUserLocation = false;
+let routeBaseLayer = null;
+let routeCompletedLayer = null;
+let routeProgressLayer = null;
+let floorPlanLayer = null;
 
 const defaultData = () => ({
     type: 'FeatureCollection',
@@ -72,7 +103,7 @@ const featureStyle = (feature) => {
             weight: 2,
             opacity: 1,
             fillColor: '#dfe7f4',
-            fillOpacity: 0.72,
+            fillOpacity: props.backgroundImage && props.backgroundVisible ? 0.08 : 0.72,
         };
     }
 
@@ -88,9 +119,9 @@ const featureStyle = (feature) => {
 
     if (kind === 'navigation') {
         return {
-            color: '#14b8a6',
-            weight: 3,
-            opacity: 1,
+            color: '#64748b',
+            weight: 2,
+            opacity: 0.35,
             fillOpacity: 0.15,
         };
     }
@@ -117,7 +148,6 @@ const centerOnUserLocation = () => {
         return;
     }
 
-    hasCenteredOnUserLocation = true;
     map.flyTo([props.userLocation.latitude, props.userLocation.longitude], Math.max(map.getZoom(), 16), { animate: true });
 };
 
@@ -126,12 +156,16 @@ const renderUserLocation = () => {
         return;
     }
 
-    if (userLocationMarker) {
-        map.removeLayer(userLocationMarker);
-        userLocationMarker = null;
+    if (!isValidUserLocation(props.userLocation)) {
+        if (userLocationMarker) {
+            map.removeLayer(userLocationMarker);
+            userLocationMarker = null;
+        }
+        return;
     }
 
-    if (!isValidUserLocation(props.userLocation)) {
+    if (userLocationMarker) {
+        userLocationMarker.setLatLng([props.userLocation.latitude, props.userLocation.longitude]);
         return;
     }
 
@@ -148,12 +182,92 @@ const renderUserLocation = () => {
     }).addTo(map);
 };
 
+const updateRouteLayer = (layer, coordinates, options) => {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        if (layer && map.hasLayer(layer)) {
+            map.removeLayer(layer);
+        }
+        return null;
+    }
+
+    const latLngs = coordinates.map(([longitude, latitude]) => [latitude, longitude]);
+    if (layer) {
+        layer.setLatLngs(latLngs);
+        if (!map.hasLayer(layer)) {
+            layer.addTo(map);
+        }
+        return layer;
+    }
+
+    return L.polyline(latLngs, options).addTo(map);
+};
+
+const renderFloorPlan = (data) => {
+    if (!map) {
+        return;
+    }
+
+    if (floorPlanLayer) {
+        map.removeLayer(floorPlanLayer);
+        floorPlanLayer = null;
+    }
+
+    if (!props.backgroundImage || !props.backgroundVisible) {
+        return;
+    }
+
+    const buildingFeatures = (data.features ?? []).filter((feature) => (
+        (feature.properties?.kind ?? feature.properties?.type) === 'building'
+    ));
+    if (buildingFeatures.length === 0) {
+        return;
+    }
+
+    const bounds = L.geoJSON({ type: 'FeatureCollection', features: buildingFeatures }).getBounds();
+    if (!bounds.isValid()
+        || Math.abs(bounds.getWest()) > 180
+        || Math.abs(bounds.getEast()) > 180
+        || Math.abs(bounds.getSouth()) > 90
+        || Math.abs(bounds.getNorth()) > 90) {
+        return;
+    }
+
+    floorPlanLayer = L.imageOverlay(props.backgroundImage, bounds, {
+        opacity: props.backgroundOpacity,
+        interactive: false,
+    }).addTo(map);
+};
+
+const renderRouteLayers = () => {
+    if (!map) {
+        return;
+    }
+
+    if (!props.routeVisible) {
+        routeBaseLayer = updateRouteLayer(routeBaseLayer, [], {});
+        routeCompletedLayer = updateRouteLayer(routeCompletedLayer, [], {});
+        routeProgressLayer = updateRouteLayer(routeProgressLayer, [], {});
+        return;
+    }
+
+    routeBaseLayer = updateRouteLayer(routeBaseLayer, props.routeGeometry, {
+        color: '#94a3b8', weight: 5, opacity: 0.55, lineCap: 'round', lineJoin: 'round',
+    });
+    routeCompletedLayer = updateRouteLayer(routeCompletedLayer, props.completedRoute, {
+        color: '#64748b', weight: 5, opacity: 0.65, lineCap: 'round', lineJoin: 'round',
+    });
+    routeProgressLayer = updateRouteLayer(routeProgressLayer, props.remainingRoute, {
+        color: '#2563eb', weight: 7, opacity: 0.98, lineCap: 'round', lineJoin: 'round',
+    });
+};
+
 const renderMapData = () => {
     if (!map || !mapContainer.value) {
         return;
     }
 
     const data = props.geojson && Array.isArray(props.geojson.features) ? props.geojson : defaultData();
+    renderFloorPlan(data);
 
     if (geoJsonLayer) {
         map.removeLayer(geoJsonLayer);
@@ -176,6 +290,7 @@ const renderMapData = () => {
                         slug: feature.properties.slug,
                         type: feature.properties.type,
                         description: feature.properties.description,
+                        access_node_id: feature.properties.access_node_id,
                     });
                 }
             });
@@ -185,11 +300,7 @@ const renderMapData = () => {
     }).addTo(map);
 
     renderUserLocation();
-
-    if (isValidUserLocation(props.userLocation) && !hasCenteredOnUserLocation && isGeoMap()) {
-        centerOnUserLocation();
-        return;
-    }
+    renderRouteLayers();
 
     const bounds = geoJsonLayer.getBounds();
     if (bounds && bounds.isValid()) {
@@ -283,8 +394,30 @@ watch(
 
         renderUserLocation();
 
-        if (isValidUserLocation(props.userLocation) && !hasCenteredOnUserLocation && isGeoMap()) {
-            centerOnUserLocation();
+    },
+    { deep: true },
+);
+
+watch(
+    () => [
+        props.routeGeometry,
+        props.completedRoute,
+        props.remainingRoute,
+        props.routeVisible,
+    ],
+    () => {
+        if (map) {
+            renderRouteLayers();
+        }
+    },
+    { deep: true },
+);
+
+watch(
+    () => [props.backgroundImage, props.backgroundVisible, props.backgroundOpacity],
+    () => {
+        if (map) {
+            renderFloorPlan(props.geojson && Array.isArray(props.geojson.features) ? props.geojson : defaultData());
         }
     },
     { deep: true },
