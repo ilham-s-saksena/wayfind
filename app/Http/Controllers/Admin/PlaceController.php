@@ -13,6 +13,8 @@ use Inertia\Inertia;
 
 class PlaceController extends Controller
 {
+    private const GEOMETRY_TOLERANCE = 1.0E-10;
+
     public function index(Floor $floor)
     {
         $floor->load(['building', 'places']);
@@ -150,10 +152,15 @@ class PlaceController extends Controller
             }
 
             $properties = $feature['properties'] ?? [];
-            $kind = $properties['kind'] ?? $properties['type'] ?? null;
-            $geometryType = $feature['geometry']['type'] ?? null;
+            $geometry = $feature['geometry'] ?? null;
+            if (! is_array($properties)) {
+                $properties = [];
+            }
 
-            return $kind !== 'navigation' && in_array($geometryType, ['Point', 'Polygon', 'MultiPolygon'], true);
+            $kind = $properties['kind'] ?? $properties['type'] ?? null;
+            $geometryType = is_array($geometry) ? ($geometry['type'] ?? null) : null;
+
+            return $kind !== 'navigation' && in_array($geometryType, ['Point', 'MultiPoint', 'Polygon', 'MultiPolygon'], true);
         }));
 
         if ($features === []) {
@@ -220,7 +227,7 @@ class PlaceController extends Controller
     protected function featureIsInsideBuilding(array $feature, array $buildingPolygons): bool
     {
         $geometry = $feature['geometry'] ?? null;
-        if (! is_array($geometry)) {
+        if (! is_array($geometry) || ! is_array($geometry['coordinates'] ?? null)) {
             return false;
         }
 
@@ -236,29 +243,35 @@ class PlaceController extends Controller
     protected function collectPolygonCoordinates(array $geometry, array &$polygons): void
     {
         if (($geometry['type'] ?? null) === 'Polygon') {
-            $polygons[] = $geometry['coordinates'] ?? [];
+            if (is_array($geometry['coordinates'] ?? null)) {
+                $polygons[] = $geometry['coordinates'];
+            }
 
             return;
         }
 
         if (($geometry['type'] ?? null) === 'MultiPolygon') {
-            foreach ($geometry['coordinates'] ?? [] as $polygonCoords) {
-                $polygons[] = $polygonCoords;
+            $coordinates = $geometry['coordinates'] ?? null;
+            if (! is_array($coordinates)) {
+                return;
+            }
+
+            foreach ($coordinates as $polygonCoords) {
+                if (is_array($polygonCoords)) {
+                    $polygons[] = $polygonCoords;
+                }
             }
         }
     }
 
     protected function pointIsInsideAnyPolygon(array $point, array $buildingPolygons): bool
     {
-        if (count($point) < 2) {
+        if (! $this->isValidCoordinate($point)) {
             return false;
         }
 
-        $longitude = (float) ($point[0] ?? 0);
-        $latitude = (float) ($point[1] ?? 0);
-
         foreach ($buildingPolygons as $polygon) {
-            if ($this->pointInPolygon($longitude, $latitude, $polygon)) {
+            if (is_array($polygon) && $this->pointInPolygon($point, $polygon)) {
                 return true;
             }
         }
@@ -268,29 +281,57 @@ class PlaceController extends Controller
 
     protected function polygonIsInsideAnyPolygon(array $rings, array $buildingPolygons): bool
     {
-        foreach ($rings as $ring) {
-            if (! is_array($ring)) {
-                return false;
+        if (! $this->hasValidPolygonRings($rings)) {
+            return false;
+        }
+
+        $outerRing = $rings[0];
+
+        foreach ($buildingPolygons as $buildingPolygon) {
+            if (! $this->hasValidPolygonRings($buildingPolygon)) {
+                continue;
             }
 
-            foreach ($ring as $coordinates) {
-                if (! is_array($coordinates) || count($coordinates) < 2) {
-                    continue;
+            $inside = true;
+            foreach ($outerRing as $index => $coordinate) {
+                if (! $this->pointInPolygon($coordinate, $buildingPolygon)) {
+                    $inside = false;
+                    break;
                 }
 
-                if (! $this->pointIsInsideAnyPolygon($coordinates, $buildingPolygons)) {
-                    return false;
+                $nextCoordinate = $outerRing[($index + 1) % (count($outerRing) - 1)];
+                if (! $this->segmentIsInsidePolygon($coordinate, $nextCoordinate, $buildingPolygon)) {
+                    $inside = false;
+                    break;
                 }
+            }
+
+            if ($inside) {
+                foreach (array_slice($buildingPolygon, 1) as $buildingHole) {
+                    $holeInteriorPoint = $this->ringInteriorPoint($buildingHole);
+                    if ($holeInteriorPoint !== null && $this->pointInPolygon($holeInteriorPoint, $rings)) {
+                        $inside = false;
+                        break;
+                    }
+                }
+            }
+
+            if ($inside) {
+                return true;
             }
         }
 
-        return true;
+        return false;
     }
 
     protected function multiPolygonIsInsideAnyPolygon(array $polygons, array $buildingPolygons): bool
     {
+        if ($polygons === []) {
+            return false;
+        }
+
         foreach ($polygons as $polygonSet) {
-            if (! $this->polygonIsInsideAnyPolygon($polygonSet, $buildingPolygons)) {
+            if (! is_array($polygonSet) || ! $this->polygonIsInsideAnyPolygon($polygonSet, $buildingPolygons)) {
                 return false;
             }
         }
@@ -300,8 +341,12 @@ class PlaceController extends Controller
 
     protected function multiPointIsInsideAnyPolygon(array $points, array $buildingPolygons): bool
     {
+        if ($points === []) {
+            return false;
+        }
+
         foreach ($points as $point) {
-            if (! $this->pointIsInsideAnyPolygon($point, $buildingPolygons)) {
+            if (! is_array($point) || ! $this->pointIsInsideAnyPolygon($point, $buildingPolygons)) {
                 return false;
             }
         }
@@ -309,25 +354,50 @@ class PlaceController extends Controller
         return true;
     }
 
-    protected function pointInPolygon(float $longitude, float $latitude, array $polygon): bool
+    protected function pointInPolygon(array $point, array $polygon): bool
     {
-        $inside = false;
-        $points = $polygon[0] ?? [];
-
-        if (! is_array($points) || $points === []) {
+        if (! $this->hasValidPolygonRings($polygon) || ! $this->isValidCoordinate($point)) {
             return false;
         }
 
-        $j = count($points) - 1;
+        $outerRing = $polygon[0];
+        if ($this->pointIsOnRingBoundary($point, $outerRing)) {
+            return true;
+        }
 
-        for ($i = 0; $i < count($points); $i++) {
-            $xi = (float) ($points[$i][0] ?? 0);
-            $yi = (float) ($points[$i][1] ?? 0);
-            $xj = (float) ($points[$j][0] ?? 0);
-            $yj = (float) ($points[$j][1] ?? 0);
+        if (! $this->pointIsInsideRing($point, $outerRing)) {
+            return false;
+        }
+
+        foreach (array_slice($polygon, 1) as $hole) {
+            if ($this->pointIsOnRingBoundary($point, $hole)) {
+                return true;
+            }
+
+            if ($this->pointIsInsideRing($point, $hole)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @param array<int, array<int, float|int>> $ring */
+    protected function pointIsInsideRing(array $point, array $ring): bool
+    {
+        $inside = false;
+        $longitude = (float) $point[0];
+        $latitude = (float) $point[1];
+        $j = count($ring) - 1;
+
+        for ($i = 0; $i < count($ring); $i++) {
+            $xi = (float) $ring[$i][0];
+            $yi = (float) $ring[$i][1];
+            $xj = (float) $ring[$j][0];
+            $yj = (float) $ring[$j][1];
 
             $intersect = (($yi > $latitude) !== ($yj > $latitude))
-                && ($longitude < (($xj - $xi) * ($latitude - $yi) / ($yj - $yi + 0.00000001)) + $xi);
+                && ($longitude < (($xj - $xi) * ($latitude - $yi) / ($yj - $yi)) + $xi);
 
             if ($intersect) {
                 $inside = ! $inside;
@@ -337,5 +407,170 @@ class PlaceController extends Controller
         }
 
         return $inside;
+    }
+
+    /** @return array{0: float, 1: float}|null */
+    protected function ringInteriorPoint(array $ring): ?array
+    {
+        $latitudes = array_values(array_unique(array_map(
+            fn (array $coordinate): string => sprintf('%.12F', (float) $coordinate[1]),
+            array_slice($ring, 0, -1),
+        )));
+        sort($latitudes, SORT_NUMERIC);
+
+        for ($index = 0, $count = count($latitudes) - 1; $index < $count; $index++) {
+            $latitude = ((float) $latitudes[$index] + (float) $latitudes[$index + 1]) / 2;
+            $longitudes = [];
+
+            for ($edge = 0, $edgeCount = count($ring) - 1; $edge < $edgeCount; $edge++) {
+                $start = $ring[$edge];
+                $end = $ring[$edge + 1];
+                if (($start[1] > $latitude) === ($end[1] > $latitude)) {
+                    continue;
+                }
+
+                $longitudes[] = $start[0] + (($latitude - $start[1]) * ($end[0] - $start[0]) / ($end[1] - $start[1]));
+            }
+
+            sort($longitudes, SORT_NUMERIC);
+            for ($intersection = 0, $intersectionCount = count($longitudes) - 1; $intersection < $intersectionCount; $intersection += 2) {
+                $point = [((float) $longitudes[$intersection] + (float) $longitudes[$intersection + 1]) / 2, $latitude];
+                if ($this->pointIsInsideRing($point, $ring)) {
+                    return $point;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    protected function pointIsOnRingBoundary(array $point, array $ring): bool
+    {
+        for ($index = 0, $count = count($ring) - 1; $index < $count; $index++) {
+            if ($this->pointIsOnSegment($point, $ring[$index], $ring[$index + 1])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function pointIsOnSegment(array $point, array $start, array $end): bool
+    {
+        $crossProduct = (($point[1] - $start[1]) * ($end[0] - $start[0]))
+            - (($point[0] - $start[0]) * ($end[1] - $start[1]));
+        $scale = max(1.0, abs($end[0] - $start[0]), abs($end[1] - $start[1]));
+
+        if (abs($crossProduct) > self::GEOMETRY_TOLERANCE * $scale) {
+            return false;
+        }
+
+        return $point[0] >= min($start[0], $end[0]) - self::GEOMETRY_TOLERANCE
+            && $point[0] <= max($start[0], $end[0]) + self::GEOMETRY_TOLERANCE
+            && $point[1] >= min($start[1], $end[1]) - self::GEOMETRY_TOLERANCE
+            && $point[1] <= max($start[1], $end[1]) + self::GEOMETRY_TOLERANCE;
+    }
+
+    protected function isValidCoordinate(mixed $coordinate): bool
+    {
+        return is_array($coordinate)
+            && count($coordinate) >= 2
+            && is_numeric($coordinate[0])
+            && is_numeric($coordinate[1])
+            && is_finite((float) $coordinate[0])
+            && is_finite((float) $coordinate[1]);
+    }
+
+    protected function hasValidPolygonRings(array $rings): bool
+    {
+        if ($rings === []) {
+            return false;
+        }
+
+        foreach ($rings as $ring) {
+            if (! is_array($ring) || count($ring) < 4) {
+                return false;
+            }
+
+            foreach ($ring as $coordinate) {
+                if (! $this->isValidCoordinate($coordinate)) {
+                    return false;
+                }
+            }
+
+            if (! $this->coordinatesMatch($ring[0], $ring[count($ring) - 1])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    protected function coordinatesMatch(array $first, array $second): bool
+    {
+        return abs((float) $first[0] - (float) $second[0]) <= self::GEOMETRY_TOLERANCE
+            && abs((float) $first[1] - (float) $second[1]) <= self::GEOMETRY_TOLERANCE;
+    }
+
+    protected function segmentIsInsidePolygon(array $start, array $end, array $polygon): bool
+    {
+        $parameters = [0.0, 1.0];
+
+        foreach ($polygon as $ring) {
+            for ($index = 0, $count = count($ring) - 1; $index < $count; $index++) {
+                foreach ($this->segmentIntersectionParameters($start, $end, $ring[$index], $ring[$index + 1]) as $parameter) {
+                    $parameters[] = $parameter;
+                }
+            }
+        }
+
+        sort($parameters, SORT_NUMERIC);
+        $parameters = array_values(array_unique(array_map(
+            fn (float $parameter): string => sprintf('%.12F', $parameter),
+            $parameters,
+        )));
+
+        for ($index = 0, $count = count($parameters) - 1; $index < $count; $index++) {
+            $from = (float) $parameters[$index];
+            $to = (float) $parameters[$index + 1];
+            if ($to - $from <= self::GEOMETRY_TOLERANCE) {
+                continue;
+            }
+
+            $middle = ($from + $to) / 2;
+            $sample = [
+                $start[0] + ($end[0] - $start[0]) * $middle,
+                $start[1] + ($end[1] - $start[1]) * $middle,
+            ];
+
+            if (! $this->pointInPolygon($sample, $polygon)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @return array<int, float> */
+    protected function segmentIntersectionParameters(array $start, array $end, array $edgeStart, array $edgeEnd): array
+    {
+        $direction = [$end[0] - $start[0], $end[1] - $start[1]];
+        $edgeDirection = [$edgeEnd[0] - $edgeStart[0], $edgeEnd[1] - $edgeStart[1]];
+        $offset = [$edgeStart[0] - $start[0], $edgeStart[1] - $start[1]];
+        $denominator = ($direction[0] * $edgeDirection[1]) - ($direction[1] * $edgeDirection[0]);
+
+        if (abs($denominator) <= self::GEOMETRY_TOLERANCE) {
+            return [];
+        }
+
+        $parameter = (($offset[0] * $edgeDirection[1]) - ($offset[1] * $edgeDirection[0])) / $denominator;
+        $edgeParameter = (($offset[0] * $direction[1]) - ($offset[1] * $direction[0])) / $denominator;
+
+        if ($parameter < -self::GEOMETRY_TOLERANCE || $parameter > 1 + self::GEOMETRY_TOLERANCE
+            || $edgeParameter < -self::GEOMETRY_TOLERANCE || $edgeParameter > 1 + self::GEOMETRY_TOLERANCE) {
+            return [];
+        }
+
+        return [max(0.0, min(1.0, $parameter))];
     }
 }
