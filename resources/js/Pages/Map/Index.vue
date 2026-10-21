@@ -41,6 +41,7 @@ const geolocationStatus = ref('idle');
 const pendingStart = ref(false);
 let pendingLocate = false;
 let cameraTimer = null;
+let awaitingJourneyLocation = false;
 const following = ref(false);
 const routeFeedback = ref('');
 const routeState = ref({ fullPath: [], completedPath: [], remainingPath: [], progress: 0 });
@@ -80,10 +81,12 @@ const remainingDistance = computed(() => routeLength(routeState.value.remainingP
 const walkingMinutes = computed(() => Math.max(1, Math.ceil(remainingDistance.value / NAVIGATION_SETTINGS.walkingSpeed / 60)));
 const mapInsets = computed(() => desktop.value
     ? { top: 48, right: 84, bottom: 36, left: 436 }
-    : { top: 100, right: 24, bottom: Math.min(sheetHeight.value + 24, window.innerHeight - 200), left: 24 });
+    : { top: 100, right: 84, bottom: Math.min(sheetHeight.value + 24, window.innerHeight - 200), left: 24 });
 const sheetCollapsed = computed(() => !desktop.value && presentation.value === 'collapsed');
 const controlsStyle = computed(() => desktop.value ? {} : { bottom: `${sheetHeight.value + 16}px` });
 const hasRoute = computed(() => routeState.value.fullPath.length > 1);
+const isApproximatePreview = computed(() => hasRoute.value && !isNavigationActive.value
+    && currentLocation.value?.accuracy > NAVIGATION_SETTINGS.maximumAccuracy);
 const canLocate = computed(() => !['requesting'].includes(geolocationStatus.value));
 const locationMessage = computed(() => ({
     requesting: 'Mencari lokasi Anda. Tunggu sebentar…',
@@ -94,7 +97,7 @@ const locationMessage = computed(() => ({
     inaccurate: `Lokasi belum cukup akurat${currentLocation.value?.accuracy ? ` (±${Math.round(currentLocation.value.accuracy)} m)` : ''}. Coba bergerak ke area terbuka.`,
     error: 'Lokasi belum dapat ditemukan. Silakan coba lagi.',
 })[geolocationStatus.value] || '');
-const statusMessage = computed(() => locationMessage.value || routeFeedback.value);
+const statusMessage = computed(() => [locationMessage.value, routeFeedback.value].filter(Boolean).join(' '));
 const accessIssue = computed(() => {
     if (!activePlace.value) return '';
     if (activePlace.value.floor_id && activePlace.value.floor_id !== props.selectedFloorId) return 'Tujuan berada di lantai lain. Pilih lantai tujuan untuk melihat rutenya.';
@@ -117,12 +120,19 @@ function clearRoute() {
     routeState.value = { fullPath: [], completedPath: [], remainingPath: [], progress: 0 };
     arrivalState.value = null;
 }
-function calculateRoute() {
+function calculateRoute({ allowApproximate = !isNavigationActive.value } = {}) {
     clearRoute();
     routeFeedback.value = '';
-    if (accessIssue.value || !currentLocation.value || geolocationStatus.value !== 'ready') return false;
+    const usablePosition = currentLocation.value && Date.now() - currentLocation.value.timestamp <= NAVIGATION_SETTINGS.maximumPositionAge
+        && (geolocationStatus.value === 'ready' || (allowApproximate && geolocationStatus.value === 'inaccurate'));
+    if (accessIssue.value || !usablePosition) return false;
     const destination = getPlaceCoordinates(activePlace.value);
-    const result = resolveGraphRoute(props.navigationGraph, [currentLocation.value.longitude, currentLocation.value.latitude], destination);
+    const origin = [currentLocation.value.longitude, currentLocation.value.latitude];
+    if (distanceBetweenPoints(origin, destination) < 0.5) {
+        routeFeedback.value = 'Lokasi yang dilaporkan berada di akses tujuan. Perbarui lokasi untuk memastikan posisi Anda.';
+        return false;
+    }
+    const result = resolveGraphRoute(props.navigationGraph, origin, destination);
     if (!result.reachable || result.fullPath.length < 2) {
         routeFeedback.value = result.reason === 'disconnected'
             ? 'Belum ada jalur yang terhubung ke tujuan ini. Silakan hubungi petugas.'
@@ -134,7 +144,7 @@ function calculateRoute() {
 }
 function beginNavigation() {
     pendingStart.value = false;
-    if (!calculateRoute()) { mode.value = 'destination'; return; }
+    if (!calculateRoute({ allowApproximate: false })) { mode.value = 'destination'; return; }
     lastReliableLocation = currentLocation.value;
     mode.value = 'navigating';
     following.value = true;
@@ -172,8 +182,9 @@ function selectPlace(place) {
     presentation.value = 'half';
     highlightedResult.value = -1;
     contextOpen.value = false;
+    awaitingJourneyLocation = !currentLocation.value;
     calculateRoute();
-    scheduleCamera('focusSelectedPlace');
+    scheduleCamera('frameJourney');
     nextTick(() => titleRef.value?.focus({ preventScroll: true }));
 }
 function scheduleCamera(method, initialOverview = false) {
@@ -193,6 +204,7 @@ function onSheetResize(height) {
     if (initial && mode.value === 'discover') scheduleCamera('fitMap', true);
 }
 function onMapInteraction() {
+    awaitingJourneyLocation = false;
     following.value = false;
     clearTimeout(cameraTimer);
 }
@@ -238,7 +250,13 @@ function requestCurrentLocation() {
         if (geolocationStatus.value === 'inaccurate') pendingStart.value = false;
         if (pendingLocate && geolocationStatus.value === 'ready') { pendingLocate = false; following.value = true; nextTick(() => mapViewRef.value?.centerOnUserLocation()); }
         if (pendingStart.value && geolocationStatus.value === 'ready') beginNavigation();
-        else if (!isNavigationActive.value && mode.value !== 'arrived') calculateRoute();
+        else if (!isNavigationActive.value && mode.value !== 'arrived') {
+            calculateRoute();
+            if (awaitingJourneyLocation && mode.value === 'destination') {
+                awaitingJourneyLocation = false;
+                scheduleCamera('frameJourney');
+            }
+        }
     }, error => {
         if (generation !== requestGeneration) return;
         geolocationStatus.value = ({ 1: 'denied', 2: 'unavailable', 3: 'timeout' })[error.code] || 'error';
@@ -303,7 +321,7 @@ watch(currentLocation, (location) => {
 });
 const onBreakpointChange = () => {
     desktop.value = media.matches;
-    scheduleCamera(mode.value === 'discover' ? 'fitMap' : isNavigationActive.value ? 'frameRoute' : 'focusSelectedPlace');
+    scheduleCamera(mode.value === 'discover' ? 'fitMap' : isNavigationActive.value ? 'frameRoute' : 'frameJourney');
 };
 onMounted(() => {
     media = window.matchMedia('(min-width: 768px)');
@@ -405,8 +423,9 @@ onBeforeUnmount(() => {
 
             <template v-else>
                 <div v-if="mode === 'arrived'" class="mb-5 rounded-xl bg-emerald-50 px-4 py-4"><p class="text-sm font-medium text-emerald-900">Tujuan ada di dekat Anda.</p><p class="mt-1 text-xs leading-5 text-emerald-800">Perhatikan pintu masuk dan penanda lokasi untuk melanjutkan ke {{ activePlace?.name }}.</p></div>
+                <p v-if="isApproximatePreview && mode !== 'arrived'" class="mb-3 text-xs font-medium text-amber-800">Pratinjau rute · posisi perkiraan</p>
                 <div v-if="hasRoute && mode !== 'arrived'" class="route-metrics mb-5 flex items-center gap-5 border-y border-slate-100 py-4">
-                    <div><p class="flex items-baseline gap-1.5"><span class="text-[28px] font-semibold leading-none tracking-[-0.04em] text-blue-600">{{ walkingMinutes }}</span><span class="text-sm font-medium text-slate-600">mnt</span></p><p class="mt-2 text-[11px] text-slate-500">Perkiraan berjalan kaki</p></div><div class="h-9 w-px bg-slate-200"></div><div><p class="text-lg font-semibold tracking-tight">{{ formatDistance(remainingDistance) }}</p><p class="mt-1 text-[11px] text-slate-500">{{ isNavigationActive ? 'Jarak tersisa' : 'Panjang rute' }}</p></div><MapIcon name="walk" class="ml-auto h-6 w-6 text-slate-400" />
+                    <div><p class="flex items-baseline gap-1.5"><span class="text-[28px] font-semibold leading-none tracking-[-0.04em] text-blue-600">{{ walkingMinutes }}</span><span class="text-sm font-medium text-slate-600">mnt</span></p><p class="mt-2 text-[11px] text-slate-500">Perkiraan berjalan kaki</p></div><div class="h-9 w-px bg-slate-200"></div><div><p class="text-lg font-semibold tracking-tight">{{ formatDistance(remainingDistance) }}</p><p class="mt-1 text-[11px] text-slate-500">{{ isNavigationActive ? 'Jarak tersisa' : isApproximatePreview ? 'Perkiraan panjang rute' : 'Panjang rute' }}</p></div><MapIcon name="walk" class="ml-auto h-6 w-6 text-slate-400" />
                 </div>
                 <div v-if="isNavigationActive" class="mb-5">
                     <p class="flex items-center gap-2 text-sm font-medium"><MapIcon name="route" class="h-4 w-4 text-blue-600" />{{ arrivalState?.count ? 'Memastikan lokasi tujuan…' : 'Ikuti jalur biru pada peta' }}</p>
@@ -414,7 +433,7 @@ onBeforeUnmount(() => {
                     <div class="mt-4 h-1 overflow-hidden rounded-full bg-slate-100" role="progressbar" :aria-valuenow="Math.round(routeState.progress * 100)" aria-valuemin="0" aria-valuemax="100" aria-label="Kemajuan perjalanan"><div class="h-full rounded-full bg-blue-600 transition-[width] duration-300 motion-reduce:transition-none" :style="{ width: `${routeState.progress * 100}%` }"></div></div>
                 </div>
                 <div v-if="activePlace?.description && !isNavigationActive" class="mb-5"><h2 class="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Tentang tujuan</h2><p class="whitespace-pre-line text-sm leading-6 text-slate-600">{{ activePlace.description }}</p></div>
-                <div v-if="!isNavigationActive && mode !== 'arrived'" class="flex gap-3 text-xs leading-5 text-slate-500"><MapIcon name="walk" class="mt-0.5 h-4 w-4 shrink-0" /><p>{{ hasRoute ? 'Rute berjalan kaki mengikuti jalur yang telah dipetakan di kompleks TVRI.' : 'Aktifkan lokasi Anda untuk melihat rute berjalan kaki menuju tujuan.' }}</p></div>
+                <div v-if="!isNavigationActive && mode !== 'arrived'" class="flex gap-3 text-xs leading-5 text-slate-500"><MapIcon name="walk" class="mt-0.5 h-4 w-4 shrink-0" /><p>{{ hasRoute ? (isApproximatePreview ? 'Rute mengikuti jalur yang dipetakan, tetapi titik awal masih berupa perkiraan. Navigasi menunggu lokasi yang lebih akurat.' : 'Rute berjalan kaki mengikuti jalur yang telah dipetakan di kompleks TVRI.') : 'Rute ditampilkan setelah posisi Anda dapat dihubungkan ke jalur yang dipetakan.' }}</p></div>
             </template>
 
             <template #footer>

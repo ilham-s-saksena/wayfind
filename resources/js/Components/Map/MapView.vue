@@ -156,19 +156,26 @@ const focusInitialUserLocation = () => {
     });
 };
 const centerOnUserLocation = () => { cameraInteracted = true; overviewUntil = 0; focusLocation(); };
-const frameRoute = () => {
-    if (!map || props.routeGeometry.length < 2) return;
-    cameraInteracted = true;
-    overviewUntil = Date.now() + 1600;
-    map.flyToBounds(L.latLngBounds(props.routeGeometry.map(([lng, lat]) => [lat, lng])), { ...cameraOptions(), maxZoom: 19 });
-};
-const focusSelectedPlace = () => {
+const frameJourney = () => {
     if (!map || !geoJsonLayer || !props.selectedPlace) return;
-    cameraInteracted = true;
     const selectedLayers = geoJsonLayer.getLayers().filter(layer => String(layer.feature?.properties?.id) === String(props.selectedPlace.id));
     const bounds = L.featureGroup(selectedLayers).getBounds();
-    if (bounds.isValid()) map.flyToBounds(bounds, { ...cameraOptions(), maxZoom: 19.5 });
+    if (isValidUserLocation(props.userLocation) && isGeoMap()) {
+        bounds.extend([props.userLocation.latitude, props.userLocation.longitude]);
+    }
+    if (destinationMarker) bounds.extend(destinationMarker.getLatLng());
+    if (props.routeVisible && props.routeGeometry.length >= 2) {
+        props.routeGeometry.forEach(([longitude, latitude]) => bounds.extend([latitude, longitude]));
+    }
+    if (!bounds.isValid()) return;
+    cameraInteracted = true;
+    overviewUntil = Date.now() + 1600;
+    map.flyToBounds(bounds, { ...cameraOptions(), maxZoom: 19 });
 };
+const frameRoute = () => {
+    if (props.routeGeometry.length >= 2) frameJourney();
+};
+const focusSelectedPlace = () => frameJourney();
 const renderDestination = () => {
     if (!map) return;
     const features = props.geojson?.features ?? [];
@@ -479,6 +486,7 @@ defineExpose({
     fitMap,
     centerOnUserLocation,
     frameRoute,
+    frameJourney,
     focusSelectedPlace,
     zoomIn: () => { onManualInteraction(); map?.zoomIn(); },
     zoomOut: () => { onManualInteraction(); map?.zoomOut(); },
