@@ -69,8 +69,15 @@ let floorPlanLayer = null;
 let accuracyLayer = null;
 let destinationMarker = null;
 let overviewUntil = 0;
+let initialLocationHandled = false;
+let initialLocationFrame = null;
+let cameraInteracted = false;
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const onManualInteraction = () => emit('manual-interaction');
+const onManualInteraction = () => {
+    cameraInteracted = true;
+    map?.stop();
+    emit('manual-interaction');
+};
 const onTouchStart = (event) => { if (event.touches.length > 1) onManualInteraction(); };
 
 const defaultData = () => ({
@@ -108,20 +115,20 @@ const featureStyle = (feature) => {
     const kind = feature?.properties?.kind ?? feature?.properties?.type ?? 'place';
     const selected = props.selectedPlace && String(feature?.properties?.id) === String(props.selectedPlace.id);
     if (kind === 'navigation') {
-        return { color: '#8b97a5', weight: 2, opacity: props.navigationActive ? 0.18 : 0.38, interactive: false };
+        return { color: '#9ca3af', weight: 1.5, opacity: props.navigationActive ? 0.22 : 0.45, interactive: false };
     }
     return {
-        color: selected ? '#2563eb' : '#718297',
-        weight: selected ? 3 : 1.5,
+        color: selected ? '#22c55e' : '#9ca3af',
+        weight: selected ? 4 : 1.5,
         opacity: props.selectedPlace && !selected ? 0.65 : 1,
-        fillColor: selected ? '#3b82f6' : '#edf2f7',
-        fillOpacity: selected ? 0.25 : 0.5,
+        fillColor: selected ? '#22c55e' : '#e5e7eb',
+        fillOpacity: selected ? 0.3 : 0.45,
         interactive: kind === 'place',
     };
 };
 const pointStyle = (feature) => ({
     ...featureStyle(feature), radius: String(feature?.properties?.id) === String(props.selectedPlace?.id) ? 7 : 5,
-    fillColor: '#fff', fillOpacity: 1, weight: 2,
+    fillOpacity: 1,
 });
 const cameraOptions = () => ({
     paddingTopLeft: [props.mapInsets.left, props.mapInsets.top],
@@ -129,21 +136,35 @@ const cameraOptions = () => ({
     duration: reducedMotion() ? 0 : 0.65,
     animate: !reducedMotion(),
 });
-const focusLocation = (animate = true) => {
+const focusLocation = (animate = true, fly = false) => {
     if (!map || !isValidUserLocation(props.userLocation) || !isGeoMap()) return;
     const zoom = Math.max(map.getZoom(), 18);
     const offset = L.point((props.mapInsets.left - props.mapInsets.right) / 2, (props.mapInsets.top - props.mapInsets.bottom) / 2);
     const target = map.unproject(map.project([props.userLocation.latitude, props.userLocation.longitude], zoom).subtract(offset), zoom);
-    map.setView(target, zoom, { animate: animate && !reducedMotion(), duration: 0.5 });
+    const options = { animate: animate && !reducedMotion(), duration: fly ? 0.8 : 0.5 };
+    if (fly) map.flyTo(target, zoom, options);
+    else map.setView(target, zoom, options);
 };
-const centerOnUserLocation = () => { overviewUntil = 0; focusLocation(); };
+const focusInitialUserLocation = () => {
+    if (initialLocationHandled || !isValidUserLocation(props.userLocation) || !isGeoMap()) return;
+    initialLocationHandled = true;
+    initialLocationFrame = requestAnimationFrame(() => {
+        initialLocationFrame = requestAnimationFrame(() => {
+            initialLocationFrame = null;
+            if (!cameraInteracted) focusLocation(true, true);
+        });
+    });
+};
+const centerOnUserLocation = () => { cameraInteracted = true; overviewUntil = 0; focusLocation(); };
 const frameRoute = () => {
     if (!map || props.routeGeometry.length < 2) return;
+    cameraInteracted = true;
     overviewUntil = Date.now() + 1600;
     map.flyToBounds(L.latLngBounds(props.routeGeometry.map(([lng, lat]) => [lat, lng])), { ...cameraOptions(), maxZoom: 19 });
 };
 const focusSelectedPlace = () => {
     if (!map || !geoJsonLayer || !props.selectedPlace) return;
+    cameraInteracted = true;
     const selectedLayers = geoJsonLayer.getLayers().filter(layer => String(layer.feature?.properties?.id) === String(props.selectedPlace.id));
     const bounds = L.featureGroup(selectedLayers).getBounds();
     if (bounds.isValid()) map.flyToBounds(bounds, { ...cameraOptions(), maxZoom: 19.5 });
@@ -166,8 +187,8 @@ const renderDestination = () => {
     const latlng = [point[1], point[0]];
     if (destinationMarker) { destinationMarker.setLatLng(latlng); return; }
     destinationMarker = L.marker(latlng, {
-        interactive: false, zIndexOffset: 800,
-        icon: L.divIcon({ className: 'wayfind-destination', iconSize: [32, 40], iconAnchor: [16, 38], html: '<svg viewBox="0 0 32 40" width="32" height="40" aria-hidden="true"><path d="M16 38S2 24 2 16a14 14 0 1 1 28 0c0 8-14 22-14 22Z" fill="#2563eb" stroke="white" stroke-width="2.5"/><circle cx="16" cy="16" r="4.5" fill="white"/></svg>' }),
+        interactive: false, pane: 'destination', zIndexOffset: 800,
+        icon: L.divIcon({ className: 'wayfind-destination', iconSize: [32, 40], iconAnchor: [16, 38], html: '<svg viewBox="0 0 32 40" width="32" height="40" aria-hidden="true"><path d="M16 38S2 24 2 16a14 14 0 1 1 28 0c0 8-14 22-14 22Z" fill="#22c55e" stroke="white" stroke-width="2.5"/><circle cx="16" cy="16" r="4.5" fill="white"/></svg>' }),
     }).addTo(map);
 };
 const renderUserLocation = () => {
@@ -187,9 +208,12 @@ const renderUserLocation = () => {
     } else if (accuracyLayer) { map.removeLayer(accuracyLayer); accuracyLayer = null; }
     if (userLocationMarker) userLocationMarker.setLatLng(latlng);
     else userLocationMarker = L.marker(latlng, {
-        interactive: false, zIndexOffset: 1000,
-        icon: L.divIcon({ className: 'user-location-marker-wrapper', html: '<span class="user-location-dot"></span>', iconSize: [20, 20], iconAnchor: [10, 10] }),
-    }).addTo(map);
+        interactive: false, keyboard: false, pane: 'userLocation', zIndexOffset: 1000,
+        title: 'Anda di sini', alt: 'Lokasi Anda',
+        icon: L.divIcon({ className: 'user-location-marker-wrapper', html: '<span class="user-location-pulse"></span><span class="user-location-dot"></span>', iconSize: [28, 28], iconAnchor: [14, 14] }),
+    }).addTo(map).bindTooltip('Anda di sini', {
+        permanent: true, direction: 'top', offset: [0, -16], pane: 'userLocation', className: 'wayfind-location-label',
+    });
 };
 
 const updateRouteLayer = (layer, coordinates, options) => {
@@ -261,14 +285,17 @@ const renderRouteLayers = () => {
     }
 
     routeBaseLayer = updateRouteLayer(routeBaseLayer, props.routeGeometry, {
-        pane: 'route', interactive: false, color: '#fff', weight: 10, opacity: 0.95, lineCap: 'round', lineJoin: 'round',
+        pane: 'route', interactive: false, color: '#fff', weight: 12, opacity: 0.95, lineCap: 'round', lineJoin: 'round',
     });
     routeCompletedLayer = updateRouteLayer(routeCompletedLayer, props.completedRoute, {
-        pane: 'route', interactive: false, color: '#94a3b8', weight: 6, opacity: 0.8, lineCap: 'round', lineJoin: 'round',
+        pane: 'route', interactive: false, color: '#94a3b8', weight: 6, opacity: 0.9, lineCap: 'round', lineJoin: 'round',
     });
     routeProgressLayer = updateRouteLayer(routeProgressLayer, props.remainingRoute, {
-        pane: 'route', interactive: false, color: '#2563eb', weight: 6, opacity: 1, lineCap: 'round', lineJoin: 'round',
+        pane: 'route', interactive: false, color: '#2563eb', weight: 8, opacity: 1, lineCap: 'round', lineJoin: 'round',
     });
+    routeBaseLayer?.bringToBack();
+    routeCompletedLayer?.bringToFront();
+    routeProgressLayer?.bringToFront();
 };
 
 const renderMapData = () => {
@@ -297,8 +324,8 @@ const renderMapData = () => {
                 label.textContent = feature.properties.name;
                 layer.bindTooltip(label, { direction: 'top', opacity: 1, className: 'wayfind-tooltip' });
             }
-            layer.on('mouseover', () => { if (layer.setStyle) layer.setStyle({ weight: 3 }); });
-            layer.on('mouseout', () => { if (layer.setStyle) layer.setStyle(featureStyle(feature)); });
+            layer.on('mouseover', () => { if (layer.setStyle) layer.setStyle({ weight: featureStyle(feature).weight + 0.5 }); });
+            layer.on('mouseout', () => { if (layer.setStyle) layer.setStyle(layer.setRadius ? pointStyle(feature) : featureStyle(feature)); });
             layer.on('click', () => {
                 if (feature.properties?.id) emit('place-selected', { ...feature.properties });
             });
@@ -343,6 +370,10 @@ const initMap = () => {
 
     map.createPane('accuracy').style.zIndex = 390;
     map.createPane('route').style.zIndex = 450;
+    map.createPane('destination').style.zIndex = 640;
+    map.createPane('userLocation').style.zIndex = 660;
+    map.getPane('destination').style.pointerEvents = 'none';
+    map.getPane('userLocation').style.pointerEvents = 'none';
     map.attributionControl.setPrefix(false);
     map.on('dragstart', onManualInteraction);
     mapContainer.value.addEventListener('wheel', onManualInteraction, { passive: true });
@@ -362,6 +393,7 @@ const initMap = () => {
         map.invalidateSize();
     });
     renderMapData();
+    focusInitialUserLocation();
 };
 
 onMounted(() => {
@@ -386,7 +418,7 @@ watch(
         }
 
         geoJsonLayer.eachLayer((layer) => {
-            if (layer.setStyle) layer.setStyle(featureStyle(layer.feature));
+            if (layer.setStyle) layer.setStyle(layer.setRadius ? pointStyle(layer.feature) : featureStyle(layer.feature));
             if (layer.setRadius) layer.setRadius(pointStyle(layer.feature).radius);
         });
         renderDestination();
@@ -402,6 +434,7 @@ watch(
         }
 
         renderUserLocation();
+        focusInitialUserLocation();
         if (props.navigationActive && props.followUser && Date.now() > overviewUntil) focusLocation();
     },
     { deep: true },
@@ -433,10 +466,11 @@ watch(
 );
 
 watch(() => props.navigationActive, () => {
-    geoJsonLayer?.eachLayer(layer => { if (layer.setStyle) layer.setStyle(featureStyle(layer.feature)); });
+    geoJsonLayer?.eachLayer(layer => { if (layer.setStyle) layer.setStyle(layer.setRadius ? pointStyle(layer.feature) : featureStyle(layer.feature)); });
 });
 
-const fitMap = () => {
+const fitMap = ({ initialOverview = false } = {}) => {
+    if (!initialOverview) cameraInteracted = true;
     const bounds = L.geoJSON(props.geojson ?? defaultData()).getBounds();
     if (bounds.isValid()) map?.fitBounds(bounds.pad(0.15), { ...cameraOptions(), maxZoom: 18.5, animate: false });
 };
@@ -452,6 +486,7 @@ defineExpose({
 });
 
 onBeforeUnmount(() => {
+    if (initialLocationFrame !== null) cancelAnimationFrame(initialLocationFrame);
     mapContainer.value?.removeEventListener('wheel', onManualInteraction);
     mapContainer.value?.removeEventListener('touchstart', onTouchStart);
     mapContainer.value?.removeEventListener('keydown', onManualInteraction);
@@ -470,7 +505,12 @@ onBeforeUnmount(() => {
 
 <style scoped>
 :global(.user-location-marker-wrapper), :global(.wayfind-destination) { background: transparent; border: none; }
-:global(.user-location-dot) { display: block; width: 20px; height: 20px; border-radius: 50%; border: 3px solid #fff; background: #2563eb; box-shadow: 0 1px 5px #1e3a5f66; }
+:global(.user-location-marker-wrapper) { display: flex; align-items: center; justify-content: center; }
+:global(.user-location-pulse) { position: absolute; inset: 0; border-radius: 50%; background: #2563eb; opacity: 0.2; animation: location-pulse 2.4s ease-out infinite; pointer-events: none; }
+:global(.user-location-dot) { position: relative; display: block; width: 22px; height: 22px; border-radius: 50%; border: 3px solid #fff; background: #2563eb; box-shadow: 0 1px 5px #1e3a5f66; }
+:global(.wayfind-location-label) { padding: 4px 8px; border: 1px solid #dbeafe; border-radius: 5px; background: #fff; color: #1e40af; font-size: 11px; font-weight: 600; box-shadow: 0 1px 4px #15233812; }
+@keyframes location-pulse { from { transform: scale(1); opacity: 0.22; } to { transform: scale(1.9); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { :global(.user-location-pulse) { animation: none; opacity: 0.12; } }
 :global(.wayfind-tooltip) { padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: 6px; color: #202124; box-shadow: 0 2px 8px #1523380d; font-family: inherit; }
 :global(.leaflet-container) { font-family: inherit; }
 :deep(.leaflet-bottom.leaflet-right) { bottom: var(--map-overlay-bottom); }

@@ -176,9 +176,12 @@ function selectPlace(place) {
     scheduleCamera('focusSelectedPlace');
     nextTick(() => titleRef.value?.focus({ preventScroll: true }));
 }
-function scheduleCamera(method) {
+function scheduleCamera(method, initialOverview = false) {
     clearTimeout(cameraTimer);
-    cameraTimer = setTimeout(() => mapViewRef.value?.[method]?.(), desktop.value ? 0 : 260);
+    cameraTimer = setTimeout(() => {
+        if (initialOverview && currentLocation.value) return;
+        mapViewRef.value?.[method]?.({ initialOverview });
+    }, desktop.value ? 0 : 260);
 }
 function exploreMap() {
     if (desktop.value) mapViewRef.value?.fitMap();
@@ -187,7 +190,11 @@ function exploreMap() {
 function onSheetResize(height) {
     const initial = sheetHeight.value === 0 && height > 0;
     sheetHeight.value = height;
-    if (initial && mode.value === 'discover') scheduleCamera('fitMap');
+    if (initial && mode.value === 'discover') scheduleCamera('fitMap', true);
+}
+function onMapInteraction() {
+    following.value = false;
+    clearTimeout(cameraTimer);
 }
 function openSearch() {
     mode.value = 'discover';
@@ -301,6 +308,7 @@ const onBreakpointChange = () => {
 onMounted(() => {
     media = window.matchMedia('(min-width: 768px)');
     media.addEventListener('change', onBreakpointChange);
+    requestCurrentLocation();
     if (props.search) {
         // Load the complete floor once so clearing a server-side query restores all destinations.
         router.get(route('map'), { building: props.selectedBuildingId, floor: props.selectedFloorId }, { preserveState: true, replace: true, onCancelToken: token => { searchCancelToken = token; } });
@@ -319,7 +327,7 @@ onBeforeUnmount(() => {
     <div lang="id" class="wayfind-public relative isolate h-screen w-full overflow-hidden bg-[#eeeee9] text-[#202124]">
         <Head title="Wayfind · TVRI Kalimantan Barat" />
         <div class="absolute inset-0 z-0">
-            <MapView ref="mapViewRef" mode="geo" :geojson="mapGeojson" :selected-place="activePlace" :user-location="currentLocation" :route-geometry="routeState.fullPath" :completed-route="routeState.completedPath" :remaining-route="routeState.remainingPath" :route-visible="mode !== 'discover' && hasRoute" :navigation-active="isNavigationActive" :follow-user="following && geolocationStatus === 'ready'" :map-insets="mapInsets" :bottom-overlay-height="sheetHeight" :background-image="backgroundImage || ''" :background-visible="backgroundVisible" :background-opacity="backgroundOpacity" @place-selected="selectPlace" @manual-interaction="following = false" />
+            <MapView ref="mapViewRef" mode="geo" :geojson="mapGeojson" :selected-place="activePlace" :user-location="currentLocation" :route-geometry="routeState.fullPath" :completed-route="routeState.completedPath" :remaining-route="routeState.remainingPath" :route-visible="mode !== 'discover' && hasRoute" :navigation-active="isNavigationActive" :follow-user="following && geolocationStatus === 'ready'" :map-insets="mapInsets" :bottom-overlay-height="sheetHeight" :background-image="backgroundImage || ''" :background-visible="backgroundVisible" :background-opacity="backgroundOpacity" @place-selected="selectPlace" @manual-interaction="onMapInteraction" />
         </div>
 
         <div class="mobile-brand absolute left-4 right-4 top-4 z-20 flex items-center justify-between gap-3 md:hidden">
