@@ -160,7 +160,9 @@ class PlaceController extends Controller
             $kind = $properties['kind'] ?? $properties['type'] ?? null;
             $geometryType = is_array($geometry) ? ($geometry['type'] ?? null) : null;
 
-            return $kind !== 'navigation' && in_array($geometryType, ['Point', 'MultiPoint', 'Polygon', 'MultiPolygon'], true);
+            return ! in_array($kind, ['building', 'navigation'], true)
+                && ($properties['type'] ?? null) !== 'building'
+                && in_array($geometryType, ['Point', 'MultiPoint', 'Polygon', 'MultiPolygon'], true);
         }));
 
         if ($features === []) {

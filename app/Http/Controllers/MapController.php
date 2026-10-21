@@ -130,24 +130,31 @@ class MapController extends Controller
     protected function buildFloorGeoJson(?Floor $floor, $places, ?Building $building = null): array
     {
         $features = [];
+        $buildingFeatures = is_array($building?->geojson) && is_array($building->geojson['features'] ?? null)
+            ? $building->geojson['features']
+            : [];
+        $buildingGeometries = array_column($buildingFeatures, 'geometry');
 
-        if ($building && is_array($building->geojson) && ($building->geojson['features'] ?? false)) {
-            foreach ($building->geojson['features'] as $feature) {
-                $features[] = [
-                    ...$feature,
-                    'properties' => [
-                        ...(isset($feature['properties']) && is_array($feature['properties']) ? $feature['properties'] : []),
-                        'kind' => 'building',
-                        'buildingId' => $building->id,
-                        'buildingName' => $building->name,
-                    ],
-                ];
-            }
+        foreach ($buildingFeatures as $feature) {
+            $features[] = [
+                ...$feature,
+                'properties' => [
+                    ...(isset($feature['properties']) && is_array($feature['properties']) ? $feature['properties'] : []),
+                    'kind' => 'building',
+                    'buildingId' => $building->id,
+                    'buildingName' => $building->name,
+                ],
+            ];
         }
 
         foreach ($places as $place) {
             $placeFeatures = $this->buildPlaceGeoJson($place);
             foreach ($placeFeatures as $feature) {
+                $geometry = $feature['geometry'] ?? null;
+                if (is_array($geometry) && in_array($geometry, $buildingGeometries, true)) {
+                    continue;
+                }
+
                 $features[] = $feature;
             }
         }
@@ -223,7 +230,9 @@ class MapController extends Controller
             $geometryType = $feature['geometry']['type'] ?? null;
             $kind = $feature['properties']['kind'] ?? $feature['properties']['type'] ?? null;
 
-            return $kind !== 'navigation' && in_array($geometryType, ['Point', 'Polygon', 'MultiPolygon'], true);
+            return ! in_array($kind, ['building', 'navigation'], true)
+                && ($feature['properties']['type'] ?? null) !== 'building'
+                && in_array($geometryType, ['Point', 'Polygon', 'MultiPolygon'], true);
         }));
 
         if ($features !== []) {

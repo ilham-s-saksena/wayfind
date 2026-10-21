@@ -46,7 +46,9 @@ const normalizeGeometry = (value) => {
 
     return {
         type: 'FeatureCollection',
-        features: value.features.filter((feature) => !!feature),
+        features: value.features.filter((feature) => feature
+            && feature.properties?.kind !== 'building'
+            && feature.properties?.type !== 'building'),
     };
 };
 
@@ -157,14 +159,17 @@ const sanitizePlaceGeojson = (value) => {
     return {
         type: 'FeatureCollection',
         features: value.features.filter((feature) => {
-            if (!feature || !feature.properties) {
-                return true;
+            if (!feature) {
+                return false;
             }
 
-            const kind = feature.properties.kind ?? feature.properties.type ?? '';
+            const kind = feature.properties?.kind ?? feature.properties?.type ?? '';
             const geometryType = feature.geometry?.type;
 
-            return kind !== 'navigation' && ['Point', 'Polygon', 'MultiPolygon'].includes(geometryType);
+            return kind !== 'navigation'
+                && kind !== 'building'
+                && feature.properties?.type !== 'building'
+                && ['Point', 'Polygon', 'MultiPolygon'].includes(geometryType);
         }),
     };
 };
@@ -285,7 +290,7 @@ const selectAccessNode = (nodeId) => {
                 :background-opacity="floor?.background_opacity ?? 0.5"
                 :map-center="[0, 0]"
                 :map-zoom="1"
-                :read-only-feature-kinds="['navigation']"
+                :read-only-feature-kinds="['building', 'navigation']"
                 :selected-access-node-id="form.access_node_id"
                 draw-mode="place"
                 feature-kind="place"

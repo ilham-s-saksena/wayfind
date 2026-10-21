@@ -70,6 +70,8 @@ let geoJsonLayer = null;
 let navigationEndpointLayer = null;
 let backgroundLayer = null;
 let ready = false;
+const editorMaxZoom = 24;
+const osmMaxNativeZoom = 19;
 
 const normalizeMapData = (value = props.mapData) => {
     if (!value || !Array.isArray(value.features)) {
@@ -224,7 +226,7 @@ const renderNavigationEndpoints = (data = normalizeMapData()) => {
     navigationEndpointLayer.addTo(map);
 };
 
-const renderGeoJson = () => {
+const renderGeoJson = (fitView = false) => {
     if (!map) {
         return;
     }
@@ -267,20 +269,15 @@ const renderGeoJson = () => {
 
     renderNavigationEndpoints(data);
 
-    if (isIndoorMap(data)) {
-        map.setView([400, 300], 1);
-        map.fitBounds([[0, 0], [1200, 800]], { padding: [20, 20] });
-        nextTick(() => {
-            requestAnimationFrame(() => {
-                map.invalidateSize();
-            });
-        });
-        return;
-    }
-
-    const bounds = geoJsonLayer.getBounds();
-    if (bounds && bounds.isValid()) {
-        map.fitBounds(bounds.pad(0.2));
+    if (fitView) {
+        if (isIndoorMap(data)) {
+            map.fitBounds([[0, 0], [1200, 800]], { padding: [20, 20] });
+        } else {
+            const bounds = geoJsonLayer.getBounds();
+            if (bounds && bounds.isValid()) {
+                map.fitBounds(bounds.pad(0.2));
+            }
+        }
     }
 
     nextTick(() => {
@@ -323,7 +320,7 @@ const collectFeatures = () => {
             return;
         }
 
-        const currentFeature = typeof layer.toGeoJSON === 'function' ? layer.toGeoJSON() : sourceFeature;
+        const currentFeature = typeof layer.toGeoJSON === 'function' ? layer.toGeoJSON(false) : sourceFeature;
         currentFeature.id = sourceFeature.id ?? sourceFeature.properties?.id;
         currentFeature.properties = { ...(sourceFeature.properties ?? {}), ...(currentFeature.properties ?? {}) };
         addFeature(currentFeature);
@@ -406,16 +403,21 @@ const initMap = () => {
         zoomControl: true,
         attributionControl: false,
         crs: indoor ? L.CRS.Simple : L.CRS.EPSG3857,
+        maxZoom: editorMaxZoom,
+        zoomSnap: 0.1,
+        zoomDelta: 0.5,
+        wheelPxPerZoomLevel: 120,
     });
 
     if (!indoor) {
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
+            maxZoom: editorMaxZoom,
+            maxNativeZoom: osmMaxNativeZoom,
             attribution: '&copy; OpenStreetMap',
         }).addTo(map);
     }
 
-    map.setView(indoor ? [400, 300] : [0, 0], indoor ? 1 : 2);
+    map.setView(indoor ? [400, 300] : [props.mapCenter[1], props.mapCenter[0]], indoor ? 1 : props.mapZoom);
 
     nextTick(() => {
         requestAnimationFrame(() => {
@@ -427,7 +429,7 @@ const initMap = () => {
     map.pm.addControls(getDrawControls());
 
     map.on('pm:create', (event) => {
-        const feature = event.layer.toGeoJSON();
+        const feature = event.layer.toGeoJSON(false);
         if (!feature?.type) {
             return;
         }
@@ -466,7 +468,7 @@ const initMap = () => {
 
 onMounted(() => {
     initMap();
-    renderGeoJson();
+    renderGeoJson(true);
     applyBackground();
 });
 

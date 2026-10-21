@@ -402,7 +402,7 @@ export const coordinatesFromPlaceFeature = (feature) => {
     return null;
 };
 
-export const splitRouteByUserPosition = (fullPath, userPoint, previousProgress = 0) => {
+export const splitRouteByUserPosition = (fullPath, userPoint, previousProgress = 0, { maximumAdvanceMeters = Infinity } = {}) => {
     if (!Array.isArray(fullPath) || fullPath.length < 2) {
         return { completedPath: [], remainingPath: fullPath ?? [], progress: 0, deviated: false, point: null };
     }
@@ -416,19 +416,28 @@ export const splitRouteByUserPosition = (fullPath, userPoint, previousProgress =
         cumulative.push(cumulative[index] + distanceBetweenPoints(fullPath[index], fullPath[index + 1]));
     }
     const totalLength = cumulative[cumulative.length - 1];
-    const minimumMeasure = Math.max(0, Math.min(totalLength, previousProgress * totalLength - 8));
+    const previousMeasure = Math.max(0, Math.min(totalLength, previousProgress * totalLength));
+    const minimumMeasure = Math.max(0, previousMeasure - 8);
     let best = null;
 
     for (let index = 0; index < fullPath.length - 1; index += 1) {
         if (cumulative[index + 1] < minimumMeasure) {
             continue;
         }
-        const projection = projectPointOntoSegment(user, fullPath[index], fullPath[index + 1]);
+        const maximumMeasure = Math.min(totalLength, previousMeasure + maximumAdvanceMeters);
+        if (cumulative[index] > maximumMeasure) continue;
+        const segmentLength = cumulative[index + 1] - cumulative[index];
+        const endFraction = segmentLength > 0 ? Math.min(1, (maximumMeasure - cumulative[index]) / segmentLength) : 1;
+        const segmentEnd = fullPath[index].map((value, axis) => value + (fullPath[index + 1][axis] - value) * endFraction);
+        const projection = projectPointOntoSegment(user, fullPath[index], segmentEnd);
         if (!projection) {
             continue;
         }
         const measure = cumulative[index] + (distanceBetweenPoints(fullPath[index], projection.point));
-        if (!best || projection.distance < best.distance || (projection.distance <= best.distance + 2 && measure > best.measure)) {
+        const similarDistance = best && Math.abs(projection.distance - best.distance) <= 2;
+        if (!best || (similarDistance
+            ? Math.abs(measure - previousMeasure) < Math.abs(best.measure - previousMeasure)
+            : projection.distance < best.distance)) {
             best = { ...projection, index, measure };
         }
     }
@@ -441,9 +450,13 @@ export const splitRouteByUserPosition = (fullPath, userPoint, previousProgress =
     }
 
     const progress = totalLength > 0 ? Math.max(previousProgress, Math.min(1, best.measure / totalLength)) : 0;
-    const projectedPoint = best.point;
-    const completedPath = [...fullPath.slice(0, best.index + 1), projectedPoint];
-    const remainingPath = [projectedPoint, ...fullPath.slice(best.index + 1)];
+    const measure = progress * totalLength;
+    const index = Math.max(0, cumulative.findIndex((value, position) => position > 0 && value >= measure) - 1);
+    const length = cumulative[index + 1] - cumulative[index];
+    const fraction = length > 0 ? (measure - cumulative[index]) / length : 0;
+    const projectedPoint = fullPath[index].map((value, axis) => value + (fullPath[index + 1][axis] - value) * fraction);
+    const completedPath = [...fullPath.slice(0, index + 1), projectedPoint];
+    const remainingPath = [projectedPoint, ...fullPath.slice(index + 1)];
 
     return {
         completedPath: completedPath.filter((point, index, path) => index === 0 || !samePoint(point, path[index - 1])),

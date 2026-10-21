@@ -106,3 +106,32 @@ test('does not invent an access point from a place polygon centroid', () => {
         geometry: { type: 'Polygon', coordinates: [[[100, 100], [120, 100], [120, 120], [100, 100]]] },
     }), null);
 });
+
+test('keeps completed and remaining geometry at the same monotonic position under GPS noise', () => {
+    const path = [[100, 100], [110, 100], [110, 110]];
+
+    const result = splitRouteByUserPosition(path, [104, 100], 0.4);
+
+    assert.equal(result.progress, 0.4);
+    assert.deepEqual(result.completedPath.at(-1), [108, 100]);
+    assert.deepEqual(result.remainingPath[0], [108, 100]);
+});
+
+test('does not jump ahead to a later crossing or overlapping route segment', () => {
+    const path = [[100, 100], [110, 100], [110, 110], [100, 110], [100, 100], [110, 100]];
+
+    const result = splitRouteByUserPosition(path, [105, 100], 0);
+
+    assert.equal(result.progress, 0.1);
+    assert.deepEqual(result.remainingPath, [[105, 100], [110, 100], [110, 110], [100, 110], [100, 100], [110, 100]]);
+});
+
+test('limits noisy forward progress without losing the already completed geometry', () => {
+    const path = [[100, 100], [200, 100]];
+
+    const result = splitRouteByUserPosition(path, [125, 100], 0.2, { maximumAdvanceMeters: 2 });
+
+    assert.equal(result.progress, 0.22);
+    assert.deepEqual(result.completedPath, [[100, 100], [122, 100]]);
+    assert.deepEqual(result.remainingPath, [[122, 100], [200, 100]]);
+});
